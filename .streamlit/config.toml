@@ -1,0 +1,23 @@
+[server]
+enableStaticServing = true
+enableCORS = false
+enableXsrfProtection = true
+headless = true
+maxUploadSize = 50
+
+[browser]
+gatherUsageStats = false
+
+[theme]
+primaryColor          = "#22c55e"
+backgroundColor       = "#080c14"
+secondaryBackgroundColor = "#0d1b2a"
+textColor             = "#e2e8f0"
+font                  = "sans serif"
+
+[client]
+showErrorDetails = false   # hide tracebacks from public users
+toolbarMode      = "minimal"
+
+[runner]
+fastReruns = true

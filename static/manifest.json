@@ -1,0 +1,54 @@
+{
+  "name": "Thrivo",
+  "short_name": "Thrivo",
+  "description": "The Personal Growth Operating System — daily tracker, habits, focus timer, finance, and more.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "theme_color": "#22c55e",
+  "background_color": "#080c14",
+  "lang": "en",
+  "dir": "ltr",
+  "categories": ["productivity", "lifestyle", "finance", "health"],
+  "icons": [
+    {
+      "src": "/static/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/static/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/static/icon-512-maskable.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Daily Tracker",
+      "short_name": "Today",
+      "description": "Today's tasks, prayers, and mood",
+      "url": "/?page=Daily+Tracker"
+    },
+    {
+      "name": "Focus Timer",
+      "short_name": "Focus",
+      "description": "Start a Pomodoro session",
+      "url": "/?page=Pomodoro"
+    },
+    {
+      "name": "Habits",
+      "short_name": "Habits",
+      "description": "Check in on today's habits",
+      "url": "/?page=Habits"
+    }
+  ]
+}
