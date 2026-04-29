@@ -100,6 +100,11 @@ ADMIN_EMAIL          = AppConfig.ADMIN_EMAIL
 # All user data, subscriptions, public prices flow through this module.
 import db
 
+# ── Smart Buying Calendar (Pro+ feature) ────────────────────────────────
+# Curated Egyptian retail calendar + data-driven analysis of scraped prices.
+# All recommendations cite sources so users can verify in-app.
+import buy_calendar
+
 def _send_admin_email(subject: str, body: str) -> bool:
     """
     Send notification email to admin via SMTP.
@@ -251,6 +256,7 @@ ALL_TABS = [
     ("💳", "Credit Tracker",   "Credit"),
     ("🏋️", "Gym Tracker",      "Gym"),
     ("📈", "EGX Stocks",       "Stocks"),
+    ("🛒", "Smart Buying",     "BuyTime"),       # NEW v10 — Egyptian buying calendar (Pro+)
     ("🎯", "Goal OS",          "GoalOS"),        # NEW — OKR-style goals
     ("✅", "Habit Tracker",    "Habits"),        # NEW — 21-day habit grid
     ("⏱️", "Focus Timer",      "Pomodoro"),      # NEW — pomodoro
@@ -281,8 +287,8 @@ SUBSCRIPTION_PLANS = {
     },
     "Pro": {
         "price": 149,
-        "tabs": ["Daily Tracker", "FinanceDash", "Habits", "Pomodoro", "GoalOS", "Gold", "Finance", "Credit", "Gym", "Stocks", "Library", "Journal", "Streaks", "Chef", "Language", "Notes", "Reports"],
-        "description": "Full personal finance + stocks + Goal OS",
+        "tabs": ["Daily Tracker", "FinanceDash", "Habits", "Pomodoro", "GoalOS", "Gold", "Finance", "Credit", "Gym", "Stocks", "BuyTime", "Library", "Journal", "Streaks", "Chef", "Language", "Notes", "Reports"],
+        "description": "Full personal finance + stocks + Goal OS + Smart Buying",
         "color": "#a78bfa"
     },
     "Business": {
@@ -7162,3 +7168,323 @@ elif st.session_state['page'] == 'FinanceDash':
     with jl4:
         if st.button("💰 Gold & Dollar", use_container_width=True):
             st.session_state["page"] = "Gold"; st.rerun()
+
+
+
+# ==========================================
+# PAGE: SMART BUYING CALENDAR (v10 new — Pro+ feature)
+# ==========================================
+elif st.session_state['page'] == 'BuyTime':
+    st.title("🛒 Smart Buying Calendar")
+    st.caption("When to buy what in Egypt — curated retail patterns plus your own scraped price data, with sources cited.")
+
+    # Honest disclaimer up top
+    st.markdown(
+        "<div style='background:var(--bg-surface);border-left:3px solid var(--info);"
+        "border-radius:0 10px 10px 0;padding:10px 14px;margin:8px 0 16px;font-size:0.85rem;'>"
+        "💡 <b>How to use this:</b> The <b>Calendar</b> tab shows known Egyptian retail discount windows "
+        "(White Friday, Eid sales, end-of-season clearances) with cited sources. The <b>Price Trends</b> tab "
+        "analyzes the price history Thrivo's daily scraper has been collecting for you. "
+        "We mark every recommendation with a confidence level — and refuse to fake confidence "
+        "where the data doesn't support it."
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+    tab_upcoming, tab_categories, tab_trends = st.tabs(
+        ["📅 Upcoming Windows", "🛍️ Browse by Category", "📊 Price Trends (your data)"]
+    )
+
+    # ── HELPER: confidence pill ──
+    def _conf_pill(conf: str) -> str:
+        if conf == "HIGH":
+            return "<span style='background:rgba(34,197,94,0.15);color:#22c55e;border:1px solid #22c55e;padding:2px 8px;border-radius:999px;font-size:0.7rem;font-weight:600;'>● HIGH</span>"
+        if conf == "MEDIUM":
+            return "<span style='background:rgba(245,158,11,0.15);color:#f59e0b;border:1px solid #f59e0b;padding:2px 8px;border-radius:999px;font-size:0.7rem;font-weight:600;'>● MEDIUM</span>"
+        return "<span style='background:rgba(100,116,139,0.15);color:#64748b;border:1px solid #64748b;padding:2px 8px;border-radius:999px;font-size:0.7rem;font-weight:600;'>● LOW</span>"
+
+
+    # ──────────────────────────────────────────────────────────────────
+    #  TAB 1 — UPCOMING WINDOWS
+    # ──────────────────────────────────────────────────────────────────
+    with tab_upcoming:
+        # Top-level summary stats
+        windows = buy_calendar.upcoming_windows(within_days=365)
+        active_now = [w for w in windows if w["is_active"]]
+        soon = [w for w in windows if 0 < w["days_until"] <= 30]
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Active right now",       len(active_now))
+        c2.metric("Starting in next 30d",   len(soon))
+        c3.metric("All upcoming",           len(windows))
+
+        st.markdown("---")
+
+        # Active windows highlighted
+        if active_now:
+            st.markdown("### 🔥 Active Right Now")
+            for w in active_now:
+                _confidence = _conf_pill(w["confidence"])
+                st.markdown(
+                    f"<div style='background:var(--bg-surface);border:1px solid var(--accent);"
+                    f"border-left:4px solid var(--accent);border-radius:12px;padding:14px 18px;margin-bottom:10px;'>"
+                    f"<div style='display:flex;justify-content:space-between;align-items:center;'>"
+                    f"<h4 style='margin:0;color:var(--text-heading);'>{w['category_icon']} {w['category_title']} · {w['name']}</h4>"
+                    f"{_confidence}</div>"
+                    f"<div style='color:var(--text-muted);font-size:0.85rem;margin-top:6px;'>📅 {w['label']}</div>"
+                    f"<div style='color:var(--accent);font-weight:600;font-size:0.9rem;margin-top:4px;'>"
+                    f"💸 Expected discount: {w['discount_range']}</div>"
+                    f"<div style='color:var(--text);font-size:0.85rem;margin-top:8px;line-height:1.5;'>{w['rationale']}</div>"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+                if w["sources"]:
+                    cite_html = " · ".join(
+                        f"<a href='{url}' target='_blank' style='color:var(--text-dim);font-size:0.72rem;'>{name}</a>"
+                        for name, url in w["sources"]
+                    )
+                    st.markdown(
+                        f"<div style='margin:-4px 0 14px 18px;font-size:0.72rem;'>"
+                        f"<span style='color:var(--text-faint);'>Sources:</span> {cite_html}</div>",
+                        unsafe_allow_html=True,
+                    )
+
+        # Upcoming timeline
+        st.markdown("### 📅 Upcoming Timeline")
+        if not windows:
+            st.info("No upcoming buying windows in the next year.")
+        else:
+            future = [w for w in windows if not w["is_active"]]
+            for w in future[:15]:
+                in_days = w["days_until"]
+                if in_days <= 7:
+                    color = "var(--warn)"
+                    badge = f"in {in_days}d"
+                elif in_days <= 30:
+                    color = "var(--info)"
+                    badge = f"in {in_days}d"
+                else:
+                    color = "var(--text-dim)"
+                    badge = w["start"].strftime("%b %d, %Y")
+                st.markdown(
+                    f"<div style='background:var(--bg-surface);border:1px solid var(--border-2);"
+                    f"border-left:3px solid {color};border-radius:10px;padding:10px 14px;margin-bottom:6px;'>"
+                    f"<div style='display:flex;justify-content:space-between;align-items:center;'>"
+                    f"<span><b>{w['category_icon']} {w['category_title']}</b> · {w['name']}</span>"
+                    f"<span style='color:{color};font-weight:600;font-size:0.82rem;'>{badge}</span></div>"
+                    f"<div style='color:var(--text-muted);font-size:0.78rem;margin-top:4px;'>"
+                    f"💸 {w['discount_range']} · {w['label']} · {_conf_pill(w['confidence'])}</div>"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+
+
+    # ──────────────────────────────────────────────────────────────────
+    #  TAB 2 — BROWSE BY CATEGORY
+    # ──────────────────────────────────────────────────────────────────
+    with tab_categories:
+        cat_keys = buy_calendar.all_categories()
+        cat_titles = {k: f"{buy_calendar.get_category(k)['icon']} {buy_calendar.get_category(k)['title']}"
+                      for k in cat_keys}
+
+        selected_cat = st.selectbox(
+            "Pick a category",
+            options=cat_keys,
+            format_func=lambda k: cat_titles[k],
+            key="buytime_cat_select",
+        )
+
+        cat = buy_calendar.get_category(selected_cat)
+        if cat:
+            st.markdown(f"### {cat['icon']} {cat['title']}")
+
+            # Honest note if present
+            if cat.get("honest_note"):
+                st.markdown(
+                    f"<div style='background:var(--fill-warn);border-left:3px solid var(--warn);"
+                    f"border-radius:0 10px 10px 0;padding:10px 14px;margin:10px 0;font-size:0.85rem;'>"
+                    f"⚠️ <b>Reality check:</b> {cat['honest_note']}"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+
+            today = datetime.date.today()
+            for w in cat["windows"]:
+                # Compute upcoming occurrences in this and next year
+                results = []
+                for offset in (0, 1):
+                    try:
+                        r = w["when"](today.year + offset)
+                    except Exception:
+                        continue
+                    if r and r[1] >= today:
+                        results.append(r)
+                if not results:
+                    continue
+                start, end, label = results[0]
+                is_active = start <= today <= end
+                _conf_html = _conf_pill(w.get("confidence", "MEDIUM"))
+
+                border_color = "var(--accent)" if is_active else "var(--border-2)"
+                border_left  = "var(--accent)" if is_active else "var(--info)"
+
+                st.markdown(
+                    f"<div style='background:var(--bg-surface);border:1px solid {border_color};"
+                    f"border-left:4px solid {border_left};border-radius:12px;padding:14px 18px;margin-bottom:12px;'>"
+                    f"<div style='display:flex;justify-content:space-between;align-items:center;'>"
+                    f"<h4 style='margin:0;color:var(--text-heading);'>"
+                    f"{'🔥 ' if is_active else ''}{w['name']}</h4>"
+                    f"{_conf_html}</div>"
+                    f"<div style='color:var(--text-muted);font-size:0.82rem;margin-top:6px;'>"
+                    f"📅 {label}</div>"
+                    f"<div style='color:var(--accent);font-weight:600;font-size:0.88rem;margin-top:4px;'>"
+                    f"💸 {w.get('discount_range','—')}</div>"
+                    f"<div style='color:var(--text);font-size:0.86rem;margin-top:8px;line-height:1.55;'>"
+                    f"{w.get('rationale','')}</div>"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+
+                # Sources
+                sources = w.get("sources", [])
+                if sources:
+                    cite_html = " · ".join(
+                        f"<a href='{url}' target='_blank' style='color:var(--text-muted);'>{name}</a>"
+                        for name, url in sources
+                    )
+                    st.markdown(
+                        f"<div style='margin:-6px 0 16px 18px;font-size:0.75rem;'>"
+                        f"<span style='color:var(--text-faint);'>📚 Sources:</span> {cite_html}</div>",
+                        unsafe_allow_html=True,
+                    )
+
+
+    # ──────────────────────────────────────────────────────────────────
+    #  TAB 3 — PRICE TRENDS (mined from scraped data)
+    # ──────────────────────────────────────────────────────────────────
+    with tab_trends:
+        st.markdown("### 📊 Analysis from Thrivo's Scraped Data")
+        st.caption(
+            "These charts run on the price history collected by Thrivo's daily scraper. "
+            "Recommendations are statistical: based on YOUR data, not predictions."
+        )
+
+        # Pull what we have
+        try:
+            assets_to_check = [
+                ("gold_k21", "🥇 Gold 21k (EGP/gram)"),
+                ("gold_k24", "🥇 Gold 24k (EGP/gram)"),
+                ("usd_egp",  "💵 USD/EGP"),
+                ("btc",      "₿ Bitcoin (USD)"),
+            ]
+            histories = {}
+            for asset_key, label in assets_to_check:
+                try:
+                    h = db.load_price_history(asset_key, days=365)
+                    if h and len(h) >= 14:
+                        histories[asset_key] = (label, h)
+                except Exception:
+                    continue
+
+            if not histories:
+                st.info(
+                    "📡 The scraper hasn't collected enough data yet for trend analysis. "
+                    "It needs at least 14 days of history per asset. "
+                    "Trends will start appearing automatically as data accumulates daily. "
+                    "Trigger the scraper manually from your GitHub repo's Actions tab to seed faster."
+                )
+            else:
+                for asset_key, (label, history) in histories.items():
+                    analysis = buy_calendar.analyze_price_history(history, asset_name=label)
+
+                    # Verdict header
+                    verdict = analysis["verdict"]
+                    if verdict == "BUY_NOW":
+                        verdict_color = "var(--accent)"
+                        verdict_emoji = "✅"
+                    elif verdict == "WAIT":
+                        verdict_color = "var(--danger)"
+                        verdict_emoji = "⏸️"
+                    elif verdict == "NEUTRAL":
+                        verdict_color = "var(--info)"
+                        verdict_emoji = "↔️"
+                    else:
+                        verdict_color = "var(--text-dim)"
+                        verdict_emoji = "❓"
+
+                    with st.container():
+                        st.markdown(
+                            f"<div style='background:var(--bg-surface);border:1px solid var(--border-2);"
+                            f"border-left:4px solid {verdict_color};border-radius:12px;padding:16px 20px;margin-bottom:12px;'>"
+                            f"<div style='display:flex;justify-content:space-between;align-items:flex-start;'>"
+                            f"<h4 style='margin:0;color:var(--text-heading);'>{label}</h4>"
+                            f"<span style='color:{verdict_color};font-weight:700;font-size:1.1rem;'>"
+                            f"{verdict_emoji} {verdict.replace('_', ' ')}</span></div>"
+                            f"<div style='color:var(--text);font-size:0.88rem;margin-top:8px;line-height:1.55;'>"
+                            f"{analysis['explanation']}</div>"
+                            f"<div style='color:var(--text-dim);font-size:0.75rem;margin-top:6px;'>"
+                            f"Based on {analysis['n_days']} days of data · "
+                            f"Confidence: {_conf_pill(analysis['confidence'])}</div>"
+                            f"</div>",
+                            unsafe_allow_html=True,
+                        )
+
+                        # Stats row
+                        if analysis.get("avg"):
+                            sc1, sc2, sc3, sc4 = st.columns(4)
+                            sc1.metric("Current",  f"{analysis['current']:,.2f}")
+                            sc2.metric("Average",  f"{analysis['avg']:,.2f}")
+                            sc3.metric("Min",      f"{analysis['min']:,.2f}")
+                            sc4.metric("Max",      f"{analysis['max']:,.2f}")
+
+                        # Plot
+                        if len(history) >= 14:
+                            df_h = pd.DataFrame([{"date": h["date"], "value": h["value"]} for h in history])
+                            df_h["date"] = pd.to_datetime(df_h["date"])
+                            fig = go.Figure()
+                            fig.add_trace(go.Scatter(
+                                x=df_h["date"], y=df_h["value"],
+                                mode="lines",
+                                line=dict(color="#22c55e", width=2),
+                                fill="tozeroy",
+                                fillcolor="rgba(34,197,94,0.06)",
+                                name=label,
+                            ))
+                            # Average line
+                            if analysis.get("avg"):
+                                fig.add_hline(
+                                    y=analysis["avg"],
+                                    line_dash="dash",
+                                    line_color="#94a3b8",
+                                    annotation_text=f"avg {analysis['avg']:,.2f}",
+                                    annotation_position="top right",
+                                    annotation_font_color="#94a3b8",
+                                )
+                            fig.update_layout(
+                                height=240,
+                                plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+                                xaxis=dict(color="#94a3b8", showgrid=False),
+                                yaxis=dict(color="#94a3b8", showgrid=True, gridcolor="#1e293b"),
+                                margin=dict(l=0, r=0, t=10, b=0),
+                                showlegend=False,
+                            )
+                            st.plotly_chart(fig, use_container_width=True)
+
+                        # Best/worst months (only if enough data)
+                        if analysis.get("best_months"):
+                            month_names = ["", "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                                           "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+                            best_str  = " · ".join(f"{month_names[m]} ({v:,.2f})" for m, v in analysis["best_months"])
+                            worst_str = " · ".join(f"{month_names[m]} ({v:,.2f})" for m, v in analysis["worst_months"])
+                            st.markdown(
+                                f"<div style='font-size:0.85rem;color:var(--text-muted);margin-top:6px;'>"
+                                f"📉 <b>Cheapest months historically:</b> {best_str}<br>"
+                                f"📈 <b>Priciest months historically:</b> {worst_str}"
+                                f"</div>",
+                                unsafe_allow_html=True,
+                            )
+
+                        st.markdown("<br>", unsafe_allow_html=True)
+        except Exception as e:
+            st.error(f"Could not load price history: {e}")
+            st.caption("This is normal on a fresh deploy. Wait for the scraper to populate data.")
