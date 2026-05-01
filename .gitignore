@@ -2,7 +2,7 @@
 #  Thrivo .gitignore (v10)
 # ═══════════════════════════════════════════════════════════════════════
 
-# ── User data & secrets — NEVER commit ──
+# ── User data & secrets — NEVER commit to main branch ──
 data_*.json
 users.json
 subscriptions.json
@@ -11,6 +11,14 @@ thrivo_shared_data.json      # legacy
 ds_tracker_data.json         # legacy
 *.bak
 *.backup
+
+# ── SQLite database (lives on thrivo-data-backup branch ONLY, never main) ──
+thrivo.db
+thrivo.db-journal
+thrivo.db-wal
+thrivo.db-shm
+*.sqlite
+*.sqlite3
 
 # ── Streamlit secrets ──
 .streamlit/secrets.toml

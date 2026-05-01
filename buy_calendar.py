@@ -190,6 +190,19 @@ def _november_11(year: int):
             f"Nov 8 – Nov 13 (Singles' Day 11.11)")
 
 
+def _mothers_day_egypt(year: int):
+    """Egyptian Mother's Day = March 21 (fixed Gregorian, not lunar).
+    Different from UK/US Mother's Day. Promo window typically Mar 10–22."""
+    return (datetime.date(year, 3, 10), datetime.date(year, 3, 22),
+            "Mar 10 – Mar 22 (Mother's Day, Mar 21)")
+
+
+def _valentines_egypt(year: int):
+    """Valentine's Day Feb 14 — beauty/perfume promo window in Egypt."""
+    return (datetime.date(year, 2, 5), datetime.date(year, 2, 16),
+            "Feb 5 – Feb 16 (Valentine's Day)")
+
+
 # ──────────────────────────────────────────────────────────────────────
 #  CATEGORY DATABASE
 # ──────────────────────────────────────────────────────────────────────
@@ -417,6 +430,108 @@ CATEGORIES: dict[str, dict] = {
             },
         ],
         "honest_note": "Smart-home prices in Egypt are dominated by White Friday + 11.11 — outside those windows, prices are flat all year.",
+    },
+
+    "personal_care_beauty": {
+        "icon":  "💄",
+        "title": "Personal Care & Beauty",
+        "subtitle": "Makeup, perfume, skincare, haircare, oral care, grooming",
+        "windows": [
+            {
+                "name":           "Pre-Eid al-Fitr (Egypt's #1 beauty window)",
+                "when":           _pre_eid_fitr_window,
+                "discount_range": "30–80% off (premium brands), 2-for-1 sets common",
+                "confidence":     "HIGH",
+                "rationale":      "The biggest beauty/perfume sale window in Egypt by margin. Ramfa Beauty runs '2X1 Eid' campaigns. Sephora Egypt ships dedicated 'Ramadan Beauty Nights' gift sets. Noon offers up to 80% off on perfumes, luxury gift sets, and personal care products with Eid promo codes. Stock can sell out in last 3 days — buy 7–10 days before Eid for best selection.",
+                "sources": [
+                    ("Ramfa Beauty Egypt — Eid 2X1 collection", "https://ramfabeauty.com/collections/makeup"),
+                    ("Noon Egypt — Eid al-Fitr beauty deals", "https://qyubic.com/eg-en/discount-codes/noon/"),
+                    ("Qyubic Egypt — Beauty seasonal calendar", "https://qyubic.com/eg-en/discount-codes/beauty/"),
+                ],
+            },
+            {
+                "name":           "Mother's Day (Mar 21 — Egypt-specific)",
+                "when":           _mothers_day_egypt,
+                "discount_range": "20–50% off, perfume gift sets featured",
+                "confidence":     "HIGH",
+                "rationale":      "Egypt's Mother's Day is March 21 (fixed Gregorian — different from US/UK). Beauty retailers run dedicated campaigns: AlCoupon Egypt confirms Chanel/Dior perfume promos, skincare gift sets, and 'fashion + beauty' bundles. Best for gifting; less aggressive on individual products than pre-Eid.",
+                "sources": [
+                    ("AlCoupon Egypt — Mother's Day 21.3 offers", "https://egypt.alcoupon.com/en/mothers-day-offers-year-best-mothers-day-gifts"),
+                ],
+            },
+            {
+                "name":           "Ramadan beauty (early Ramadan)",
+                "when":           _ramadan_window,
+                "discount_range": "20–40% on Ramadan-themed gift sets, halal beauty",
+                "confidence":     "MEDIUM",
+                "rationale":      "Sephora Favorites releases 'Ramadan Beauty Nights' sets — typically 6-piece curated sets at ~30% off vs individual product pricing. Noon and Mahzooz run modest-fashion-adjacent skincare/halal-makeup promos. Gift-set value, not deep individual-product discounts.",
+                "sources": [
+                    ("Ramfa Beauty — Sephora Ramadan sets", "https://ramfabeauty.com/collections/makeup"),
+                    ("Noon — Ramadan deals (March–April)", "https://qyubic.com/eg-en/discount-codes/noon/"),
+                ],
+            },
+            {
+                "name":           "Eid al-Adha (perfume & oud focus)",
+                "when":           _pre_eid_adha_window,
+                "discount_range": "20–40%, perfume sets prominent",
+                "confidence":     "MEDIUM",
+                "rationale":      "Smaller than Eid al-Fitr but still significant — Arabic oud, perfume gift sets, hair oils, and 'festive beauty bundles' are the focus categories. Less makeup, more fragrance and grooming.",
+                "sources": [
+                    ("Qyubic Egypt — Eid al-Adha beauty bundles", "https://qyubic.com/eg-en/discount-codes/beauty/"),
+                ],
+            },
+            {
+                "name":           "Yellow Friday / White Friday",
+                "when":           _white_friday_window,
+                "discount_range": "30–80% (Sephora Egypt, Noon, Amazon EG)",
+                "confidence":     "HIGH",
+                "rationale":      "Major skincare & anti-aging window: Sephora Egypt, Noon Yellow Friday, Amazon EG White Friday. Best discounts of the year on serums, retinol, LED beauty tools, and skincare devices. Perfumes typically less aggressive than Eid windows but still good.",
+                "sources": [
+                    ("AlCoupon Egypt — White Friday beauty", "https://egypt.alcoupon.com/en/black-friday-sale"),
+                    ("AlCoupon — Black Friday vs White Friday", "https://egypt.alcoupon.com/en/blog/black-friday-vs-white-friday-everything-you-need-to-know"),
+                ],
+            },
+            {
+                "name":           "Valentine's Day (Feb 14)",
+                "when":           _valentines_egypt,
+                "discount_range": "10–25% on perfumes & gift sets",
+                "confidence":     "MEDIUM",
+                "rationale":      "Smaller window than Mother's Day or Eid, but perfume retailers (especially niche/luxury) run focused promos. Best for couples-perfume sets and travel sizes. Note: less culturally embedded in Egypt than Mother's Day.",
+                "sources": [],
+            },
+            {
+                "name":           "11.11 Singles' Day",
+                "when":           _november_11,
+                "discount_range": "15–40% on Korean & Chinese beauty",
+                "confidence":     "MEDIUM",
+                "rationale":      "K-beauty (sheet masks, snail creams, BB cushions) and Chinese beauty brands (Floral Street, Florasis) discount most heavily here on Noon and AliExpress. Limited reach for Western prestige brands.",
+                "sources": [
+                    ("AlCoupon — November sales calendar", "https://egypt.alcoupon.com/en/best-black-november-sale-and-offers"),
+                ],
+            },
+            {
+                "name":           "Back-to-school (compact essentials)",
+                "when":           _back_to_school_window,
+                "discount_range": "10–20% on travel & compact sizes",
+                "confidence":     "LOW",
+                "rationale":      "Compact makeup, travel cleansers, lip balms, mist sprays bundle for university students. Smaller pattern, mostly drugstore brands (Maybelline, NYX, L'Oréal Paris). Skip if you don't need exactly these formats.",
+                "sources": [
+                    ("Qyubic Egypt — Back-to-school beauty", "https://qyubic.com/eg-en/discount-codes/beauty/"),
+                ],
+            },
+            {
+                "name":           "Year-round oral care 2-pack deals",
+                "when":           lambda y: (datetime.date(y, 1, 1), datetime.date(y, 12, 31),
+                                             "Year-round (rotating weekly)"),
+                "discount_range": "15% off twin-packs (Signal, Closeup)",
+                "confidence":     "MEDIUM",
+                "rationale":      "Noon Egypt confirms a permanent rotating promo: 15% off when buying any 2 toothbrushes from Signal or Closeup. Toothpaste 2-packs follow similar pattern. Stock 3-month supply when promo is active rather than chasing monthly sales.",
+                "sources": [
+                    ("Noon Egypt — oral care twin-pack deals", "https://qyubic.com/eg-en/discount-codes/noon/"),
+                ],
+            },
+        ],
+        "honest_note": "Beauty in Egypt is unusually skewed toward Eid (especially Eid al-Fitr) — 60–80% off there, vs 20–40% in most other windows. If you can wait, time premium fragrances/skincare to pre-Eid. Drugstore items (oral care, basic skincare) follow Yellow/White Friday patterns more than Eid.",
     },
 
     "furniture": {

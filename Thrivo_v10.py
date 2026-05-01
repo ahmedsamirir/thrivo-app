@@ -64,17 +64,39 @@ class AppConfig:
     SESSION_TIMEOUT    = 300                         # 5 minutes idle timeout
 
     # ── Admin contact ──
-    ADMIN_EMAIL   = _cfg("THRIVO_ADMIN_EMAIL", "egahmedsamir255@gmail.com")
+    # Empty default — set via env var or st.secrets in production deploy
+    ADMIN_EMAIL   = _cfg("THRIVO_ADMIN_EMAIL", "")
     SUPPORT_URL   = _cfg("THRIVO_SUPPORT_URL", "")
 
-    # ── Legacy — used nowhere critical, kept for backward compat ──
-    APP_PASSWORD  = _cfg("THRIVO_APP_PASSWORD", "ahmedsamir1271")
+    # ── DEPRECATED legacy single-password gate ──
+    # APP_PASSWORD was used by v8 (single-password gate). The current
+    # multi-user auth (users.json + per-user password hashes) replaces it.
+    # We keep the symbol for back-compat with any user-customized code that
+    # might still reference it, but it is NOT used by the auth flow and
+    # does NOT need a value. Empty default = no leaked secret.
+    APP_PASSWORD  = _cfg("THRIVO_APP_PASSWORD", "")
     SCRAPE_URL    = "https://goldbullioneg.com/%D8%A3%D8%B3%D8%B9%D8%A7%D8%B1-%D8%A7%D9%84%D8%B0%D9%87%D8%A8/"
 
-    # ── Payment (EGP) — phone stored as hash, never plaintext ──
-    _PAYMENT_PHONE = _cfg("THRIVO_PAYMENT_PHONE", "01149859581")
-    PAYMENT_PHONE_HASH   = hashlib.sha256(str(_PAYMENT_PHONE).encode()).hexdigest()
-    PAYMENT_PHONE_MASKED = str(_PAYMENT_PHONE)[:3] + "****" + str(_PAYMENT_PHONE)[-4:]
+    # ── Payment phone (stored as SHA-256 hash, never plaintext) ──
+    # Set via THRIVO_PAYMENT_PHONE env var or st.secrets. Empty default —
+    # the admin panel checks if it's set before showing the manual-payment flow.
+    _PAYMENT_PHONE = _cfg("THRIVO_PAYMENT_PHONE", "")
+    PAYMENT_PHONE_HASH = (
+        hashlib.sha256(str(_PAYMENT_PHONE).encode()).hexdigest()
+        if _PAYMENT_PHONE else ""
+    )
+    PAYMENT_PHONE_MASKED = (
+        (str(_PAYMENT_PHONE)[:3] + "****" + str(_PAYMENT_PHONE)[-4:])
+        if _PAYMENT_PHONE and len(str(_PAYMENT_PHONE)) >= 7 else ""
+    )
+
+    # ── Admin bootstrap password ──
+    # On FIRST run with an empty users table, the app creates a default admin.
+    # In production, set THRIVO_ADMIN_BOOTSTRAP_PASSWORD via env var/secret.
+    # If unset, a cryptographically random password is generated and printed
+    # ONCE to the server logs — operator must read it from logs and immediately
+    # change it after first login.
+    ADMIN_BOOTSTRAP_PASSWORD = _cfg("THRIVO_ADMIN_BOOTSTRAP_PASSWORD", "")
 
     # ── SMTP (optional — admin notification emails) ──
     SMTP_USER = _cfg("SMTP_USER", "")
@@ -104,6 +126,108 @@ import db
 # Curated Egyptian retail calendar + data-driven analysis of scraped prices.
 # All recommendations cite sources so users can verify in-app.
 import buy_calendar
+
+
+# ──────────────────────────────────────────────────────────────────────
+#  GLOBAL USD/EGP RATE — used for all income conversion
+# ──────────────────────────────────────────────────────────────────────
+#  Resolution order (fastest first, falling back gracefully):
+#    1. Live scrape from goldbullioneg.com — same source as Finance tab.
+#       This is the authoritative path; works from any deploy with internet.
+#    2. Public DB price snapshot (populated by GitHub Actions cron).
+#    3. The bundled scripts/scrape_prices.py module's investing.com fetcher.
+#    4. Hard fallback (50.0) — last resort, only when offline.
+#
+#  Note: this function does NOT read user data because it runs at module
+#  scope (before the user's data is loaded). For per-user history fallback,
+#  the page calls `_resolve_usd_rate(data)` which adds that tier.
+@st.cache_data(ttl=1800)  # 30 min cache
+def get_usd_egp_rate_global():
+    # 1. Live scrape from goldbullioneg.com (same as Finance tab uses)
+    try:
+        r = requests.get(SCRAPE_URL, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
+        soup = BeautifulSoup(r.content, 'html.parser')
+        cells = soup.find_all(['td', 'th'])
+        for i, c in enumerate(cells):
+            txt = c.get_text(strip=True)
+            if ("الدولار" in txt or "أمريكي" in txt) and i + 1 < len(cells):
+                try:
+                    rate = float(cells[i + 1].get_text(strip=True)
+                                                  .replace(',', '').replace('EGP', '').strip())
+                    if 5 < rate < 1000:  # sanity check
+                        return rate
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    # 2. DB price snapshot (cron-populated)
+    try:
+        prices = db.load_prices()
+        if prices:
+            usd = prices.get("usd_egp") or {}
+            rate = usd.get("rate")
+            if rate and 5 < float(rate) < 1000:
+                return float(rate)
+    except Exception:
+        pass
+
+    # 3. Bundled scrape_prices.py investing.com fetcher
+    try:
+        import sys as _sys, os as _os
+        scripts_dir = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "scripts")
+        if scripts_dir not in _sys.path:
+            _sys.path.insert(0, scripts_dir)
+        import importlib
+        sp = importlib.import_module("scrape_prices")
+        result = sp.fetch_usd_egp()
+        if result and result.get("rate"):
+            r = float(result["rate"])
+            if 5 < r < 1000:
+                try:
+                    db.save_price("usd_egp", result)
+                except Exception:
+                    pass
+                return r
+    except Exception:
+        pass
+
+    # 4. Hard fallback — only hit when offline
+    return 50.0
+
+
+def _resolve_usd_rate(user_data: dict | None = None) -> float:
+    """Return the best available USD/EGP rate. Use this at PAGE level —
+    it consults user_data['price_history'] as an extra fallback before
+    landing on the global 50.0 default."""
+    rate = get_usd_egp_rate_global()
+    if rate != 50.0:
+        return rate
+    # Per-user price_history fallback (Finance tab populates this)
+    if user_data and user_data.get("price_history"):
+        try:
+            ph = user_data["price_history"]
+            latest = sorted(ph.keys())[-1]
+            saved = ph[latest].get("usd")
+            if saved and 5 < float(saved) < 1000:
+                return float(saved)
+        except Exception:
+            pass
+    return 50.0
+
+
+def amount_to_egp(amount, currency, usd_rate=None):
+    """Convert any amount to EGP. Use this everywhere instead of summing
+    raw amounts. Defaults to global USD rate but accepts an override."""
+    try:
+        amt = float(amount or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    cur = (currency or "EGP").upper()
+    if cur == "USD":
+        rate = usd_rate if usd_rate else get_usd_egp_rate_global()
+        return amt * float(rate)
+    return amt
 
 def _send_admin_email(subject: str, body: str) -> bool:
     """
@@ -174,10 +298,15 @@ def get_gemini_key():
     # 3. Environment variable
     return os.environ.get("GEMINI_API_KEY", "")
 
-def call_gemini(prompt_text, max_tokens=1200, temperature=0.7, model=None):
+def call_gemini(prompt_text, max_tokens=8192, temperature=0.7, model=None):
     """
     Call Google Gemini API with exponential backoff retry.
-    
+
+    Returns the FULL response text by joining all `parts` returned by the
+    model. Earlier versions only read parts[0] which truncated multi-part
+    responses to a single line. Default max_tokens raised from 1200 → 8192
+    (the model's actual output cap) so long answers aren't cut short.
+
     Available models (set GEMINI_MODEL in sidebar or pass model= directly):
       - gemini-2.0-flash        → Fast, free tier, latest Flash (default)
       - gemini-2.5-flash-preview-05-20 → Most capable Flash, free tier
@@ -189,7 +318,6 @@ def call_gemini(prompt_text, max_tokens=1200, temperature=0.7, model=None):
         return ("⚠️ No Gemini API key. Add it in the sidebar under 🔑 AI Settings. "
                 "Get a free key at https://aistudio.google.com/app/apikey")
 
-    # Resolve which model to use
     if model is None:
         model = st.session_state.get("gemini_model", "gemini-2.5-flash")
 
@@ -197,14 +325,50 @@ def call_gemini(prompt_text, max_tokens=1200, temperature=0.7, model=None):
            f"{model}:generateContent?key={api_key}")
     payload = {
         "contents": [{"parts": [{"text": prompt_text}]}],
-        "generationConfig": {"temperature": temperature, "maxOutputTokens": max_tokens},
+        "generationConfig": {
+            "temperature":     temperature,
+            "maxOutputTokens": max_tokens,
+        },
     }
     for attempt in range(4):
         try:
             resp = requests.post(url, json=payload,
-                                 headers={"Content-Type": "application/json"}, timeout=60)
+                                 headers={"Content-Type": "application/json"}, timeout=120)
             if resp.status_code == 200:
-                return resp.json()["candidates"][0]["content"]["parts"][0]["text"]
+                data = resp.json()
+                candidates = data.get("candidates", [])
+                if not candidates:
+                    # No candidates returned — usually a safety block
+                    block = data.get("promptFeedback", {}).get("blockReason", "")
+                    if block:
+                        return f"⚠️ Gemini blocked the prompt: {block}. Try rephrasing."
+                    return "⚠️ Gemini returned no response. Try rephrasing or simplifying your question."
+
+                cand = candidates[0]
+                # ── Collect ALL parts, not just parts[0] (the original bug) ──
+                parts = (cand.get("content", {}) or {}).get("parts", []) or []
+                text_chunks = [p.get("text", "") for p in parts if isinstance(p, dict)]
+                full_text = "".join(c for c in text_chunks if c)
+
+                finish = cand.get("finishReason", "")
+                if not full_text:
+                    # No text at all — explain why so users know
+                    if finish == "SAFETY":
+                        return ("⚠️ Gemini's safety filters blocked this response. "
+                                "Try rephrasing your question without sensitive keywords.")
+                    if finish == "RECITATION":
+                        return "⚠️ Gemini blocked the response (recitation). Try rephrasing."
+                    if finish == "MAX_TOKENS":
+                        return ("⚠️ Gemini hit the token limit before producing output. "
+                                "Try a shorter prompt.")
+                    return f"⚠️ Gemini returned an empty response (finish reason: {finish or 'unknown'})."
+
+                # Got text — note if truncated so the user knows there's more
+                if finish == "MAX_TOKENS":
+                    full_text += ("\n\n_…response was truncated at the token limit. "
+                                  "Ask for a shorter or more focused answer to see the full reply._")
+                return full_text
+
             if resp.status_code == 503:
                 time.sleep(2 ** attempt)
                 continue
@@ -272,6 +436,22 @@ ALL_TABS = [
     ("🏆", "Reports",          "Reports"),
 ]
 
+
+# ──────────────────────────────────────────────────────────────────────
+#  SIDEBAR GROUPING — logical categories so 20+ tabs don't overwhelm
+# ──────────────────────────────────────────────────────────────────────
+# Order of groups = display order in sidebar. Tabs not in any group fall
+# into "Other" automatically. Each group has an icon + display title.
+TAB_GROUPS = [
+    ("🏠 Today",          ["Daily Tracker", "Reports"]),
+    ("💰 Money",          ["FinanceDash", "Finance", "Gold", "Credit",
+                           "Stocks", "BuyTime"]),
+    ("🚀 Growth",         ["GoalOS", "Habits", "Pomodoro", "Streaks"]),
+    ("❤️ Wellbeing",      ["Gym", "Chef", "Language", "Journal"]),
+    ("🛠️ Workspace",      ["Business", "Agile", "Library", "Notes"]),
+    ("🤖 AI",             ["AIAdviser"]),
+]
+
 SUBSCRIPTION_PLANS = {
     "Free": {
         "price": 0,
@@ -312,21 +492,48 @@ def _sanitize(s: str) -> str:
     """Strip any dangerous characters to prevent injection"""
     return _re.sub(r'[^\w\s@._\-]', '', str(s))[:100]
 
+def _generate_admin_bootstrap_password() -> str:
+    """Resolve the admin's first-run password.
+    Priority:
+      1. THRIVO_ADMIN_BOOTSTRAP_PASSWORD env var / st.secrets (production-set)
+      2. A cryptographically-random 16-char password generated at first run
+         and printed to server logs ONCE — operator must log in and change it.
+    Never hardcoded in source.
+    """
+    if AppConfig.ADMIN_BOOTSTRAP_PASSWORD:
+        return str(AppConfig.ADMIN_BOOTSTRAP_PASSWORD)
+    # Generate a random one — printed to logs once
+    import secrets, string
+    alphabet = string.ascii_letters + string.digits
+    pw = "".join(secrets.choice(alphabet) for _ in range(16))
+    # Print to server stdout (Streamlit Cloud / Render show this in deploy logs)
+    print("=" * 70)
+    print("🔐 THRIVO FIRST-RUN ADMIN PASSWORD (write this down NOW):")
+    print(f"   username: admin")
+    print(f"   password: {pw}")
+    print("   Log in immediately and change it. This password will not be shown again.")
+    print("   To set a fixed bootstrap password, set THRIVO_ADMIN_BOOTSTRAP_PASSWORD env var.")
+    print("=" * 70)
+    return pw
+
 def _load_users():
     """Load all users from the active backend (Postgres or JSON files).
-    On first run with an empty users table, bootstraps a default admin account."""
+    On first run with an empty users table, bootstraps a default admin account
+    with a password from THRIVO_ADMIN_BOOTSTRAP_PASSWORD or a random one."""
     users = db.load_users()
     if not users:
+        bootstrap_pw = _generate_admin_bootstrap_password()
         admin = {
             "admin": {
-                "password_hash": _hash_password("admin1234"),
+                "password_hash": _hash_password(bootstrap_pw),
                 "plan":         "Admin",
-                "email":        "admin@thrivo.app",
+                "email":        AppConfig.ADMIN_EMAIL or "admin@thrivo.app",
                 "approved":     True,
                 "is_admin":     True,
                 "created_at":   datetime.datetime.utcnow().isoformat(),
                 "custom_tabs":  None,
-                "display_name": "Admin"
+                "display_name": "Admin",
+                "must_change_password": True,  # forces change on first login
             }
         }
         db.save_users(admin)
@@ -770,6 +977,85 @@ def render_auth():
 def render_admin_panel(users: dict):
     """Admin user management panel with approval queue."""
     st.title("⚙️ Admin Panel — Thrivo")
+
+    # ── DATABASE & BACKUP STATUS ──
+    backend_kind   = db.get_backend_kind()
+    init_err       = db.get_init_error()
+    backup_status  = db.get_backup_status()
+
+    backend_color  = ("#22c55e" if backend_kind == "Postgres"
+                      else "#3b82f6" if backend_kind == "SQLite"
+                      else "#f59e0b")
+
+    with st.expander(f"🗄️ Database & Backup ({backend_kind})", expanded=False):
+        col_a, col_b = st.columns(2)
+        with col_a:
+            if backend_kind == "Postgres":
+                _backend_caption = "Postgres URL is set — production mode."
+            elif backend_kind == "SQLite":
+                _backend_caption = "Single SQLite file (thrivo.db). Add DATABASE_URL env to switch to Postgres."
+            else:
+                _backend_caption = "Fallback JSON storage. SQLite & Postgres both unavailable."
+            st.markdown(
+                f"<div style='background:var(--bg-surface);border:1px solid var(--border-2);"
+                f"border-left:3px solid {backend_color};border-radius:10px;padding:12px 16px;'>"
+                f"<div style='color:var(--text-dim);font-size:0.7rem;text-transform:uppercase;"
+                f"letter-spacing:0.1em;margin-bottom:4px;'>Active Backend</div>"
+                f"<div style='color:{backend_color};font-size:1.2rem;font-weight:700;'>{backend_kind}</div>"
+                f"<div style='color:var(--text-muted);font-size:0.78rem;margin-top:4px;'>"
+                f"{_backend_caption}"
+                f"</div></div>",
+                unsafe_allow_html=True,
+            )
+            if init_err:
+                st.warning(f"⚠️ {init_err}")
+
+        with col_b:
+            if backend_kind == "SQLite":
+                bup_color = "#22c55e" if backup_status["configured"] else "#64748b"
+                bup_text  = ("Configured" if backup_status["configured"]
+                             else "NOT configured — data is at risk on Streamlit Cloud!")
+                if backup_status["configured"]:
+                    _bup_detail = (f"Repo: {backup_status['repo']}<br>"
+                                   f"Branch: {backup_status['branch']}<br>"
+                                   f"Last push: {backup_status['last_push']}")
+                else:
+                    _bup_detail = "Set THRIVO_BACKUP_PAT and THRIVO_BACKUP_REPO env vars / secrets."
+                st.markdown(
+                    f"<div style='background:var(--bg-surface);border:1px solid var(--border-2);"
+                    f"border-left:3px solid {bup_color};border-radius:10px;padding:12px 16px;'>"
+                    f"<div style='color:var(--text-dim);font-size:0.7rem;text-transform:uppercase;"
+                    f"letter-spacing:0.1em;margin-bottom:4px;'>GitHub Backup</div>"
+                    f"<div style='color:{bup_color};font-size:1rem;font-weight:600;'>{bup_text}</div>"
+                    f"<div style='color:var(--text-muted);font-size:0.78rem;margin-top:4px;'>"
+                    f"{_bup_detail}"
+                    f"</div></div>",
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.info(f"Backup mechanism is SQLite-only. {backend_kind} has its own persistence.")
+
+        st.markdown("")
+        col_x, col_y = st.columns(2)
+        with col_x:
+            if backend_kind == "SQLite" and backup_status["configured"]:
+                if st.button("🔄 Force backup now", use_container_width=True):
+                    ok, msg = db.force_backup_now()
+                    if ok:
+                        st.success(f"✓ Backed up: {msg}")
+                    else:
+                        st.error(f"✗ Failed: {msg}")
+        with col_y:
+            if backend_kind == "SQLite":
+                db_bytes = db.export_db_bytes()
+                if db_bytes:
+                    st.download_button(
+                        f"📥 Download thrivo.db ({len(db_bytes)/1024:.1f} KB)",
+                        data=db_bytes,
+                        file_name=f"thrivo_{datetime.date.today().isoformat()}.db",
+                        mime="application/octet-stream",
+                        use_container_width=True,
+                    )
 
     # ── PENDING APPROVALS (shown first if any) ──
     pending = {u: d for u, d in users.items() if d.get("status") == "pending"}
@@ -1345,8 +1631,9 @@ def _get_default_user_data():
         "notes": {},
         "credit": {
             "transactions": [], "installment_plans": [],
-            "limits": {"QNB": 0, "EGBank": 0},
-            "balances": {"QNB": 0, "EGBank": 0}
+            "limits": {"QNB": 0, "EGBank": 0},        # legacy — kept for backward compat
+            "balances": {"QNB": 0, "EGBank": 0},      # legacy — kept for backward compat
+            "accounts": []                             # v10.2+ — flexible: cards & installment programs
         },
         "gym": {"sessions": [], "workouts": [], "habits": []},
         "stocks": {"watchlist": [], "price_history": {}},
@@ -1364,6 +1651,7 @@ def _get_default_user_data():
         "habits":   {"list": [], "log": {}},                     # habits: [{id,name,icon,target_days,created}], log: {YYYY-MM-DD: [habit_id,...]}
         "pomodoro": {"sessions": [], "settings": {"focus_min": 25, "break_min": 5, "long_break_min": 15, "long_every": 4}},
         "okr":      {"objectives": [], "checkins": []},          # quarterly OKRs + weekly check-ins
+        "buytime":  {"watchlist": [], "savings_log": []},        # v10.1: planned purchases + savings tracker
     }
 
 def load_user_data():
@@ -1381,6 +1669,7 @@ def load_user_data():
     # Patch credit sub-keys (legacy)
     if "limits"   not in d["credit"]: d["credit"]["limits"]   = {"QNB": 0, "EGBank": 0}
     if "balances" not in d["credit"]: d["credit"]["balances"] = {"QNB": 0, "EGBank": 0}
+    if "accounts" not in d["credit"]: d["credit"]["accounts"] = []   # v10.2+ — flexible accounts
     return d
 
 def save_data(d):
@@ -1443,12 +1732,88 @@ with st.sidebar:
             st.rerun()
 
     allowed_pages = [t for t in ALL_TABS if t[2] in _user_tabs]
-    for icon, label, key in allowed_pages:
-        is_active = st.session_state.get("page") == key
-        btn_label = ("▶ " if is_active else "") + icon + " " + label
-        if st.button(btn_label, use_container_width=True, key="nav_" + key):
-            st.session_state["page"] = key
-            st.rerun()
+
+    # ── Search box — instantly filters across all groups ──
+    nav_query = st.text_input(
+        "Find tab",
+        key="nav_search",
+        placeholder="🔎 Search tabs...",
+        label_visibility="collapsed",
+    ).strip().lower()
+
+    def _matches_search(label: str, key: str) -> bool:
+        if not nav_query:
+            return True
+        return (nav_query in label.lower()) or (nav_query in key.lower())
+
+    # Build a key→(icon, label) lookup once
+    tab_lookup = {key: (icon, label) for icon, label, key in allowed_pages}
+    allowed_keys = set(tab_lookup.keys())
+    grouped_keys = set()  # track tabs assigned to a group so "Other" gets the rest
+
+    # Active page — for "What I clicked last" indicator
+    active_page = st.session_state.get("page")
+
+    # ── Render each group (only if it has at least one allowed+matching tab) ──
+    for group_title, group_keys in TAB_GROUPS:
+        in_group = [k for k in group_keys if k in allowed_keys]
+        grouped_keys.update(group_keys)
+        # Filter by search
+        visible = [k for k in in_group if _matches_search(tab_lookup[k][1], k)]
+        if not visible:
+            continue
+
+        # Group header (small, muted, with count)
+        st.markdown(
+            f"<div style='margin:14px 0 4px;color:var(--text-faint);"
+            f"font-size:0.68rem;text-transform:uppercase;letter-spacing:0.12em;"
+            f"font-weight:600;display:flex;justify-content:space-between;'>"
+            f"<span>{group_title}</span>"
+            f"<span style='color:var(--text-faint);'>{len(visible)}</span>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
+        for k in visible:
+            icon, label = tab_lookup[k]
+            is_active = active_page == k
+            btn_label = ("▶ " if is_active else "") + icon + " " + label
+            if st.button(btn_label, use_container_width=True, key="nav_" + k,
+                         type="primary" if is_active else "secondary"):
+                st.session_state["page"] = k
+                st.rerun()
+
+    # ── Catch-all: any tabs not in any group ──
+    other = [k for k in allowed_keys if k not in grouped_keys]
+    other_visible = [k for k in other if _matches_search(tab_lookup[k][1], k)]
+    if other_visible:
+        st.markdown(
+            "<div style='margin:14px 0 4px;color:var(--text-faint);"
+            "font-size:0.68rem;text-transform:uppercase;letter-spacing:0.12em;"
+            "font-weight:600;'>📦 Other</div>",
+            unsafe_allow_html=True,
+        )
+        for k in other_visible:
+            icon, label = tab_lookup[k]
+            is_active = active_page == k
+            btn_label = ("▶ " if is_active else "") + icon + " " + label
+            if st.button(btn_label, use_container_width=True, key="nav_" + k,
+                         type="primary" if is_active else "secondary"):
+                st.session_state["page"] = k
+                st.rerun()
+
+    # If search filtered everything out, show a hint
+    if nav_query:
+        any_visible = any(
+            _matches_search(tab_lookup[k][1], k) for k in allowed_keys
+        )
+        if not any_visible:
+            st.markdown(
+                f"<div style='color:var(--text-faint);font-size:0.78rem;"
+                f"text-align:center;padding:14px 0;'>"
+                f"No tabs match '{nav_query}'.</div>",
+                unsafe_allow_html=True,
+            )
 
     st.divider()
     st.markdown("<p style='font-size:0.7rem;color:#475569;letter-spacing:0.1em;text-transform:uppercase;'>This Week</p>", unsafe_allow_html=True)
@@ -1703,7 +2068,7 @@ Suggest a beautiful, balanced day protocol for me. Include:
 - Evening wind-down (1 item)
 Be specific, inspiring, and concise. Format as a simple bulleted list."""
                     with st.spinner("✨ Getting suggestions..."):
-                        suggestions = call_gemini(wk_prompt, max_tokens=400)
+                        suggestions = call_gemini(wk_prompt, max_tokens=1500)
                     st.markdown(f"""
                     <div style='background:#0d1b2a; border:1px solid {mode_color}; border-radius:10px; padding:14px;'>
                         <div style='color:{mode_color}; font-size:0.8rem; margin-bottom:8px;'>✨ AI Day Suggestions</div>
@@ -2557,7 +2922,7 @@ Provide a concise market analysis covering:
 Keep it practical, specific to Egyptian context, and under 400 words."""
 
             with st.spinner("🤖 Analysing markets..."):
-                ai_market_text = call_gemini(ai_prompt, max_tokens=800)
+                ai_market_text = call_gemini(ai_prompt, max_tokens=2500)
                 today_str_ai = datetime.date.today().strftime('%B %d, %Y')
                 st.markdown(
                     f"<div style='background:#0d1b2a; border:1px solid #3b82f6; border-radius:12px; padding:20px; margin-top:8px;'>"
@@ -2791,6 +3156,217 @@ elif st.session_state['page'] == 'Finance':
                 f"<div style='color:#fb923c;font-family:JetBrains Mono,monospace;font-size:0.9rem;margin-top:4px;'>"
                 f"This month total: {month_total:,.0f} EGP</div>", unsafe_allow_html=True)
 
+        # ── Month-over-month health indicator + PNG export (v10.3+) ──
+        # Compares THIS month's extras to LAST month's. Shows a colored health
+        # banner and a button to download a styled PNG report of last month.
+        st.markdown("---")
+        st.markdown("### 📊 Month-over-Month Comparison & PNG Report")
+
+        # Compute last calendar month
+        _today_extras = datetime.date.today()
+        _first_of_this = _today_extras.replace(day=1)
+        _last_month_end = _first_of_this - datetime.timedelta(days=1)
+        last_month_str = _last_month_end.strftime("%Y-%m")
+        last_month_label = _last_month_end.strftime("%B %Y")
+        this_month_label = _today_extras.strftime("%B %Y")
+
+        last_month_extras = [e for e in all_extras if str(e.get("date","")).startswith(last_month_str)]
+        this_month_total = sum(safe_float(r.get("amount", 0)) for r in month_extras)
+        last_month_total = sum(safe_float(r.get("amount", 0)) for r in last_month_extras)
+
+        # Health verdict
+        if last_month_total <= 0:
+            health_color = "#3b82f6"
+            health_emoji = "📊"
+            health_title = "No prior month data"
+            health_msg   = f"You spent {this_month_total:,.0f} EGP on extras in {this_month_label}. Once you have last month's data, we'll show you the trend."
+            health_pct   = 0
+        else:
+            delta_pct = (this_month_total - last_month_total) / last_month_total * 100
+            health_pct = delta_pct
+            if delta_pct < -10:
+                health_color, health_emoji = "#22c55e", "🟢"
+                health_title = f"Spending DOWN {abs(delta_pct):.1f}%"
+                health_msg   = (f"This month: {this_month_total:,.0f} EGP. Last month: {last_month_total:,.0f} EGP. "
+                                f"You saved {last_month_total - this_month_total:,.0f} EGP — keep it up!")
+            elif delta_pct < 10:
+                health_color, health_emoji = "#3b82f6", "↔️"
+                health_title = f"Spending stable ({delta_pct:+.1f}%)"
+                health_msg   = (f"This month: {this_month_total:,.0f} EGP. Last month: {last_month_total:,.0f} EGP. "
+                                f"Within ±10% of last month — steady.")
+            elif delta_pct < 30:
+                health_color, health_emoji = "#f59e0b", "🟡"
+                health_title = f"Spending UP {delta_pct:.1f}%"
+                health_msg   = (f"This month: {this_month_total:,.0f} EGP. Last month: {last_month_total:,.0f} EGP. "
+                                f"You spent {this_month_total - last_month_total:,.0f} EGP more this month. "
+                                f"Worth a look — see the report below.")
+            else:
+                health_color, health_emoji = "#ef4444", "🔴"
+                health_title = f"Spending UP {delta_pct:.1f}%"
+                health_msg   = (f"This month: {this_month_total:,.0f} EGP. Last month: {last_month_total:,.0f} EGP. "
+                                f"That's {this_month_total - last_month_total:,.0f} EGP more — review your categories below.")
+
+        st.markdown(
+            f"<div style='background:var(--bg-surface);border:1px solid {health_color};"
+            f"border-left:4px solid {health_color};border-radius:12px;padding:14px 18px;margin-bottom:14px;'>"
+            f"<div style='display:flex;justify-content:space-between;align-items:flex-start;'>"
+            f"<div><h4 style='margin:0;color:var(--text-heading);font-size:1.05rem;'>{health_emoji} {health_title}</h4>"
+            f"<div style='color:var(--text);font-size:0.88rem;margin-top:6px;line-height:1.5;'>{health_msg}</div></div>"
+            f"</div></div>",
+            unsafe_allow_html=True,
+        )
+
+        # Quick metrics row
+        mom_c1, mom_c2, mom_c3 = st.columns(3)
+        mom_c1.metric(this_month_label, f"{this_month_total:,.0f} EGP")
+        mom_c2.metric(last_month_label, f"{last_month_total:,.0f} EGP")
+        if last_month_total > 0:
+            delta_egp = this_month_total - last_month_total
+            mom_c3.metric("Difference", f"{delta_egp:+,.0f} EGP", f"{health_pct:+.1f}%",
+                          delta_color="inverse")
+
+        # ── Generate PNG report of LAST MONTH'S extras ──
+        if not last_month_extras:
+            st.info(f"📭 No extra expenses logged for {last_month_label} — nothing to export yet.")
+        else:
+            # Group by category
+            cat_totals = {}
+            for e in last_month_extras:
+                cat = e.get("category", "Other") or "Other"
+                cat_totals[cat] = cat_totals.get(cat, 0) + safe_float(e.get("amount", 0))
+            cat_sorted = sorted(cat_totals.items(), key=lambda x: x[1], reverse=True)
+
+            # Quick summary preview
+            with st.expander(f"👀 Preview {last_month_label} breakdown", expanded=False):
+                preview_html = "<div style='display:grid;grid-template-columns:1fr 1fr;gap:6px;'>"
+                for cat, total in cat_sorted:
+                    pct = (total / last_month_total * 100) if last_month_total else 0
+                    preview_html += (f"<div style='display:flex;justify-content:space-between;"
+                                     f"background:var(--bg-surface);border:1px solid var(--border-2);"
+                                     f"border-radius:8px;padding:8px 12px;'>"
+                                     f"<span><b>{cat}</b></span>"
+                                     f"<span style='font-family:JetBrains Mono,monospace;'>"
+                                     f"{total:,.0f} EGP <span style='color:var(--text-dim);'>"
+                                     f"({pct:.0f}%)</span></span></div>")
+                preview_html += "</div>"
+                st.markdown(preview_html, unsafe_allow_html=True)
+
+            # ── PNG generation ──
+            def _build_extras_png(month_label, extras_list, total, cat_breakdown,
+                                  prev_total, prev_label, delta_pct, health_color_hex):
+                """Render a clean PNG report card for sharing."""
+                fig, axes = plt.subplots(2, 1, figsize=(8.5, 11),
+                                         gridspec_kw={'height_ratios': [1, 2.2]},
+                                         dpi=150)
+                fig.patch.set_facecolor("#0d1b2a")
+
+                # ── Top: hero header with totals ──
+                ax_h = axes[0]
+                ax_h.set_facecolor("#0d1b2a")
+                ax_h.axis("off")
+                ax_h.set_xlim(0, 10); ax_h.set_ylim(0, 10)
+
+                # Brand — text-only since matplotlib's DejaVu Sans lacks emoji glyphs
+                ax_h.text(0.3, 9.0, "THRIVO", fontsize=22, color="#22c55e",
+                          fontweight="bold", family="sans-serif")
+                ax_h.text(0.3, 8.1, f"Extra Expenses Report — {month_label}",
+                          fontsize=14, color="#cbd5e1", family="sans-serif")
+
+                # Total
+                ax_h.text(0.3, 6.6, "TOTAL", fontsize=9, color="#64748b",
+                          family="sans-serif")
+                ax_h.text(0.3, 5.2, f"{total:,.0f}", fontsize=42, color="#e2e8f0",
+                          fontweight="bold", family="monospace")
+                ax_h.text(0.3, 4.0, "EGP", fontsize=14, color="#94a3b8", family="sans-serif")
+
+                # MoM box
+                if prev_total > 0:
+                    mom_txt = f"vs {prev_label}: {delta_pct:+.1f}%"
+                    ax_h.add_patch(mpatches.FancyBboxPatch(
+                        (5.5, 4.0), 4.2, 1.2, boxstyle="round,pad=0.05,rounding_size=0.18",
+                        edgecolor=health_color_hex, facecolor=health_color_hex + "22",
+                        linewidth=2,
+                    ))
+                    ax_h.text(5.7, 4.85, mom_txt, fontsize=12, color=health_color_hex,
+                              fontweight="bold", family="monospace")
+                    ax_h.text(5.7, 4.35, f"{prev_label}: {prev_total:,.0f} EGP",
+                              fontsize=9, color="#94a3b8", family="sans-serif")
+
+                # Item count
+                ax_h.text(0.3, 2.6, f"{len(extras_list)} items", fontsize=11,
+                          color="#475569", family="sans-serif")
+                ax_h.text(0.3, 1.9, f"across {len(cat_breakdown)} categories",
+                          fontsize=10, color="#475569", family="sans-serif")
+
+                # ── Bottom: horizontal bar chart of categories ──
+                ax_b = axes[1]
+                ax_b.set_facecolor("#0d1b2a")
+                cats_to_show = cat_breakdown[:10]
+                cat_names  = [c[0] for c in cats_to_show]
+                cat_values = [c[1] for c in cats_to_show]
+
+                # Friendly category palette
+                palette = ["#22c55e", "#3b82f6", "#f59e0b", "#a855f7",
+                           "#ec4899", "#14b8a6", "#ef4444", "#eab308",
+                           "#06b6d4", "#8b5cf6"]
+                bar_colors = [palette[i % len(palette)] for i in range(len(cat_values))]
+
+                y_pos = np.arange(len(cat_names))
+                bars = ax_b.barh(y_pos, cat_values, color=bar_colors, edgecolor="none", height=0.65)
+                ax_b.set_yticks(y_pos)
+                ax_b.set_yticklabels(cat_names, fontsize=11, color="#e2e8f0")
+                ax_b.invert_yaxis()
+                ax_b.set_xlabel("EGP", color="#94a3b8", fontsize=10)
+                ax_b.tick_params(colors="#94a3b8")
+                ax_b.spines["top"].set_visible(False)
+                ax_b.spines["right"].set_visible(False)
+                ax_b.spines["bottom"].set_color("#334155")
+                ax_b.spines["left"].set_color("#334155")
+                ax_b.grid(axis="x", color="#1e293b", linestyle="--", alpha=0.6)
+                ax_b.set_axisbelow(True)
+                ax_b.set_title(f"Breakdown by category — {month_label}",
+                               fontsize=13, color="#e2e8f0", pad=14, loc="left")
+
+                # Value labels on bars
+                max_v = max(cat_values) if cat_values else 1
+                for bar, val in zip(bars, cat_values):
+                    pct = (val / total * 100) if total else 0
+                    ax_b.text(bar.get_width() + max_v * 0.01,
+                              bar.get_y() + bar.get_height() / 2,
+                              f"{val:,.0f} ({pct:.0f}%)",
+                              va="center", color="#cbd5e1", fontsize=10,
+                              family="monospace")
+
+                # Footer
+                fig.text(0.05, 0.015,
+                         f"Generated {datetime.date.today().strftime('%Y-%m-%d')} · Thrivo Finance",
+                         fontsize=8, color="#475569")
+                fig.text(0.95, 0.015, "thrivo.app", fontsize=8, color="#475569",
+                         ha="right")
+
+                plt.tight_layout(rect=[0, 0.03, 1, 1])
+                buf = io.BytesIO()
+                plt.savefig(buf, format="png", facecolor="#0d1b2a",
+                            edgecolor="none", bbox_inches="tight", dpi=150)
+                plt.close(fig)
+                buf.seek(0)
+                return buf.getvalue()
+
+            png_bytes = _build_extras_png(
+                last_month_label, last_month_extras, last_month_total,
+                cat_sorted, this_month_total, this_month_label,
+                health_pct, health_color,
+            )
+
+            st.download_button(
+                f"📸 Download PNG report — {last_month_label}",
+                data=png_bytes,
+                file_name=f"thrivo_extras_{last_month_str}.png",
+                mime="image/png",
+                use_container_width=True,
+                type="primary",
+            )
+
     with t3:
         c1, c2 = st.columns(2)
         with c1:
@@ -2935,11 +3511,399 @@ Be specific with EGP amounts. Make the plan realistic for an Egyptian profession
 # PAGE 4: CREDIT TRACKER — QNB & EGBank
 # ==========================================
 elif st.session_state['page'] == 'Credit':
-    st.title("💳 Credit Tracker — QNB & EGBank")
+    st.title("💳 Credit & Installments")
+    st.caption("All your credit cards and installment programs in one place — Egyptian banks plus Valu, Souhoola, ContactNow, MidTakseet, Sympl, Halan, and more.")
 
     credit = data["credit"]
     today_dt = datetime.date.today()
     current_month_str = today_dt.strftime("%Y-%m")
+
+    # ── My Accounts (v10.2+) — flexible card / installment-program manager ──
+    accounts = credit.setdefault("accounts", [])
+
+    # Catalog of common providers — pre-populated for convenience
+    PROVIDER_PRESETS = {
+        # Egyptian credit-card banks
+        "QNB":           {"kind": "credit_card",   "color": "#a020f0", "default_apr": 52.2,  "min_pmt_pct": 5},
+        "CIB":           {"kind": "credit_card",   "color": "#003366", "default_apr": 51.0,  "min_pmt_pct": 5},
+        "NBE":           {"kind": "credit_card",   "color": "#006633", "default_apr": 48.0,  "min_pmt_pct": 5},
+        "Banque Misr":   {"kind": "credit_card",   "color": "#dc143c", "default_apr": 48.0,  "min_pmt_pct": 5},
+        "Bank of Alex":  {"kind": "credit_card",   "color": "#0066cc", "default_apr": 50.0,  "min_pmt_pct": 5},
+        "EGBank":        {"kind": "credit_card",   "color": "#22c55e", "default_apr": 36.0,  "min_pmt_pct": 5},
+        "ADIB":          {"kind": "credit_card",   "color": "#8b0000", "default_apr": 50.0,  "min_pmt_pct": 5},
+        "HSBC Egypt":    {"kind": "credit_card",   "color": "#db0011", "default_apr": 51.0,  "min_pmt_pct": 5},
+        # Egyptian installment apps / BNPL programs
+        "Valu":          {"kind": "installment_app", "color": "#9333ea", "default_apr": 22.0, "min_pmt_pct": 0},
+        "Souhoola":      {"kind": "installment_app", "color": "#f97316", "default_apr": 24.0, "min_pmt_pct": 0},
+        "ContactNow":    {"kind": "installment_app", "color": "#0ea5e9", "default_apr": 26.0, "min_pmt_pct": 0},
+        "Halan":         {"kind": "installment_app", "color": "#ef4444", "default_apr": 28.0, "min_pmt_pct": 0},
+        "MidTakseet":    {"kind": "installment_app", "color": "#14b8a6", "default_apr": 24.0, "min_pmt_pct": 0},
+        "Sympl":         {"kind": "installment_app", "color": "#ec4899", "default_apr": 0,    "min_pmt_pct": 0},
+        "Khazna":        {"kind": "installment_app", "color": "#6366f1", "default_apr": 25.0, "min_pmt_pct": 0},
+        "aman":          {"kind": "installment_app", "color": "#64748b", "default_apr": 24.0, "min_pmt_pct": 0},
+        "Other / Custom":{"kind": "credit_card",   "color": "#475569", "default_apr": 50.0,  "min_pmt_pct": 5},
+    }
+
+    # ── Top-of-page overview metrics (across ALL accounts: legacy + user-added) ──
+    _credit_legacy_balance = sum(float(v or 0) for v in credit.get("balances", {}).values())
+    _credit_legacy_limit   = sum(float(v or 0) for v in credit.get("limits",   {}).values())
+    _usd_rate_credit = _resolve_usd_rate(data)
+    _accounts_balance = sum(amount_to_egp(a.get("balance", 0), a.get("currency", "EGP"), _usd_rate_credit) for a in accounts)
+    _accounts_limit   = sum(amount_to_egp(a.get("limit",   0), a.get("currency", "EGP"), _usd_rate_credit) for a in accounts)
+    total_debt    = _credit_legacy_balance + _accounts_balance
+    total_limit   = _credit_legacy_limit   + _accounts_limit
+    total_avail   = max(0, total_limit - total_debt)
+    total_util    = (total_debt / total_limit * 100) if total_limit > 0 else 0
+
+    util_color = ("#22c55e" if total_util <= 30 else
+                  "#f59e0b" if total_util <= 60 else "#ef4444")
+    util_label = ("Healthy" if total_util <= 30 else
+                  "Watch this" if total_util <= 60 else "High — pay down")
+
+    st.markdown(
+        f"""<div style='background:linear-gradient(135deg, var(--bg-surface) 0%, var(--bg-surface-2) 100%);
+            border:1px solid var(--border-2);border-radius:16px;padding:18px 22px;margin:12px 0 18px;'>
+            <div style='display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:18px;'>
+              <div>
+                <div style='color:var(--text-dim);font-size:0.7rem;text-transform:uppercase;
+                    letter-spacing:0.1em;margin-bottom:2px;'>Total Debt</div>
+                <div style='font-family:JetBrains Mono,monospace;font-size:1.7rem;
+                    font-weight:700;color:var(--text-heading);'>{total_debt:,.0f} EGP</div>
+              </div>
+              <div>
+                <div style='color:var(--text-dim);font-size:0.7rem;text-transform:uppercase;
+                    letter-spacing:0.1em;margin-bottom:2px;'>Available Credit</div>
+                <div style='font-family:JetBrains Mono,monospace;font-size:1.7rem;
+                    font-weight:700;color:#22c55e;'>{total_avail:,.0f} EGP</div>
+              </div>
+              <div>
+                <div style='color:var(--text-dim);font-size:0.7rem;text-transform:uppercase;
+                    letter-spacing:0.1em;margin-bottom:2px;'>Total Credit Limit</div>
+                <div style='font-family:JetBrains Mono,monospace;font-size:1.7rem;
+                    font-weight:700;color:var(--text-heading);'>{total_limit:,.0f} EGP</div>
+              </div>
+              <div>
+                <div style='color:var(--text-dim);font-size:0.7rem;text-transform:uppercase;
+                    letter-spacing:0.1em;margin-bottom:2px;'>Utilization</div>
+                <div style='font-family:JetBrains Mono,monospace;font-size:1.7rem;
+                    font-weight:700;color:{util_color};'>{total_util:.1f}%</div>
+                <div style='font-size:0.72rem;color:{util_color};font-weight:600;'>{util_label}</div>
+              </div>
+            </div>
+        </div>""",
+        unsafe_allow_html=True,
+    )
+
+    # ── Tabbed layout (Overview + My Accounts only — QNB/EGBank detail follows below) ──
+    credit_tab_overview, credit_tab_accounts = st.tabs([
+        "📊 Overview",
+        f"🏦 My Accounts ({len(accounts)})",
+    ])
+
+    # ╔══════════════════════════════════════════════════════════════════
+    # ║ TAB 1 — OVERVIEW (visual breakdown of all accounts)
+    # ╚══════════════════════════════════════════════════════════════════
+    with credit_tab_overview:
+        if not accounts and total_debt == 0:
+            st.markdown(
+                "<div style='background:var(--bg-surface);border:1px dashed var(--border-2);"
+                "border-radius:12px;padding:32px 18px;text-align:center;color:var(--text-muted);'>"
+                "<div style='font-size:2.4rem;margin-bottom:8px;'>💳</div>"
+                "<div style='font-size:1rem;color:var(--text);font-weight:600;'>No credit accounts yet.</div>"
+                "<div style='font-size:0.85rem;margin-top:6px;'>"
+                "Switch to the <b>🏦 My Accounts</b> tab to add your first card or installment program.</div>"
+                "</div>",
+                unsafe_allow_html=True,
+            )
+        else:
+            # Pie chart of debt by account
+            chart_rows = []
+            for a in accounts:
+                bal_egp = amount_to_egp(a.get("balance", 0), a.get("currency", "EGP"), _usd_rate_credit)
+                if bal_egp > 0:
+                    label = a.get("nickname") or a["provider"]
+                    chart_rows.append({"name": label, "value": bal_egp, "color": a.get("color", "#475569")})
+            for bank, bal in credit.get("balances", {}).items():
+                if float(bal or 0) > 0:
+                    chart_rows.append({"name": f"{bank} (legacy)", "value": float(bal),
+                                       "color": "#3b82f6" if bank == "QNB" else "#22c55e"})
+
+            if chart_rows:
+                col_pie, col_bars = st.columns([1, 1])
+                with col_pie:
+                    st.markdown("#### 💸 Where your debt lives")
+                    fig_pie = go.Figure(data=[go.Pie(
+                        labels=[r["name"] for r in chart_rows],
+                        values=[r["value"] for r in chart_rows],
+                        hole=0.55,
+                        marker=dict(colors=[r["color"] for r in chart_rows]),
+                        textinfo="label+percent",
+                        textfont=dict(color="#e2e8f0", size=11),
+                    )])
+                    fig_pie.update_layout(
+                        height=280,
+                        plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+                        showlegend=False,
+                        margin=dict(l=0, r=0, t=10, b=0),
+                    )
+                    st.plotly_chart(fig_pie, use_container_width=True)
+                with col_bars:
+                    st.markdown("#### 📊 Utilization per account")
+                    util_rows = []
+                    for a in accounts:
+                        lim = float(a.get("limit", 0) or 0)
+                        bal = float(a.get("balance", 0) or 0)
+                        if lim > 0:
+                            util_rows.append({
+                                "name":  (a.get("nickname") or a["provider"])[:18],
+                                "util":  bal / lim * 100,
+                                "color": a.get("color", "#475569"),
+                            })
+                    for bank in credit.get("limits", {}):
+                        lim = float(credit["limits"].get(bank, 0) or 0)
+                        bal = float(credit["balances"].get(bank, 0) or 0)
+                        if lim > 0:
+                            util_rows.append({"name": bank, "util": bal / lim * 100,
+                                              "color": "#3b82f6" if bank == "QNB" else "#22c55e"})
+
+                    if util_rows:
+                        fig_bar = go.Figure()
+                        fig_bar.add_trace(go.Bar(
+                            x=[r["util"] for r in util_rows],
+                            y=[r["name"] for r in util_rows],
+                            orientation="h",
+                            marker_color=[r["color"] for r in util_rows],
+                            text=[f"{r['util']:.1f}%" for r in util_rows],
+                            textposition="outside",
+                        ))
+                        # 30% healthy line
+                        fig_bar.add_vline(x=30, line_dash="dot", line_color="#22c55e",
+                                          line_width=1, opacity=0.5)
+                        fig_bar.add_vline(x=60, line_dash="dot", line_color="#ef4444",
+                                          line_width=1, opacity=0.5)
+                        fig_bar.update_layout(
+                            height=280,
+                            plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+                            xaxis=dict(color="#94a3b8", showgrid=True, gridcolor="#1e293b",
+                                       title="Utilization %", range=[0, max(105, max((r['util'] for r in util_rows), default=100) + 10)]),
+                            yaxis=dict(color="#cbd5e1", showgrid=False, autorange="reversed"),
+                            margin=dict(l=0, r=20, t=10, b=20),
+                            showlegend=False,
+                        )
+                        st.plotly_chart(fig_bar, use_container_width=True)
+                    else:
+                        st.caption("Add accounts to see utilization breakdown.")
+
+            # Health signals
+            st.markdown("---")
+            st.markdown("#### 🩺 Health Signals")
+            signals_html = []
+            if total_util <= 30:
+                signals_html.append(("🟢", "Utilization is healthy", f"{total_util:.1f}% — well under the 30% credit-score threshold.", "var(--accent)"))
+            elif total_util <= 60:
+                signals_html.append(("🟡", "Utilization is climbing", f"{total_util:.1f}% — try to keep it under 30% for credit score.", "var(--warn)"))
+            else:
+                signals_html.append(("🔴", "High utilization", f"{total_util:.1f}% — pay down to protect your credit score.", "var(--danger)"))
+
+            high_apr = sorted(
+                [a for a in accounts if float(a.get("balance", 0) or 0) > 0],
+                key=lambda x: float(x.get("apr", 0) or 0),
+                reverse=True,
+            )
+            if high_apr and float(high_apr[0].get("apr", 0) or 0) >= 30:
+                worst = high_apr[0]
+                signals_html.append(("⚠️", f"High APR account",
+                    f"{worst['provider']} at {worst.get('apr', 0):.1f}% APR carries balance — prioritize paying this first.",
+                    "var(--warn)"))
+
+            for emoji, title, msg, color in signals_html:
+                st.markdown(
+                    f"<div style='background:var(--bg-surface);border:1px solid var(--border-2);"
+                    f"border-left:3px solid {color};border-radius:10px;padding:10px 14px;margin-bottom:8px;'>"
+                    f"<b>{emoji} {title}</b><br>"
+                    f"<span style='color:var(--text-muted);font-size:0.86rem;'>{msg}</span></div>",
+                    unsafe_allow_html=True,
+                )
+
+    # ╔══════════════════════════════════════════════════════════════════
+    # ║ TAB 2 — MY ACCOUNTS (form + list, was the expander before)
+    # ╚══════════════════════════════════════════════════════════════════
+    with credit_tab_accounts:
+        st.caption(
+            "Add the credit cards and installment apps (Valu, Souhoola, etc.) you actually use. "
+            "Each account is private to your login. For QNB / EGBank with full transaction-level "
+            "tracking, use the <b>QNB & EGBank Detail</b> tab.",
+        )
+
+        # ── Add new account form ──
+        with st.expander("➕ Add a new account", expanded=len(accounts) == 0):
+            with st.form("add_credit_account_form_v2", clear_on_submit=True):
+                c1, c2, c3 = st.columns([2, 1, 1])
+                with c1:
+                    provider_choice = st.selectbox(
+                        "Provider",
+                        options=list(PROVIDER_PRESETS.keys()),
+                        help="Pick from the catalog. Use 'Other / Custom' for anything not listed.",
+                    )
+                    custom_name = ""
+                    if provider_choice == "Other / Custom":
+                        custom_name = st.text_input("Custom provider name *",
+                                                    placeholder="e.g. AAIB, Mashreq, ...")
+                    nickname = st.text_input("Nickname (optional)",
+                                             placeholder="e.g. 'Daily card', 'Travel Visa'",
+                                             help="Helpful if you have 2+ cards from the same bank")
+                with c2:
+                    preset = PROVIDER_PRESETS[provider_choice]
+                    kind_choice = st.selectbox(
+                        "Type", options=["credit_card", "installment_app"],
+                        index=0 if preset["kind"] == "credit_card" else 1,
+                        format_func=lambda k: "💳 Credit Card" if k == "credit_card" else "📲 Installment App",
+                    )
+                    currency_choice = st.selectbox("Currency", options=["EGP", "USD"], index=0)
+                with c3:
+                    limit_input    = st.number_input("Credit Limit",        min_value=0.0, step=1000.0, value=0.0)
+                    balance_input  = st.number_input("Current Balance Owed", min_value=0.0, step=100.0,  value=0.0)
+
+                c4, c5, c6 = st.columns([1, 1, 1])
+                with c4:
+                    apr_input = st.number_input("APR (% per year)",
+                                                min_value=0.0, max_value=200.0, step=0.5,
+                                                value=float(preset["default_apr"]),
+                                                help="Annual percentage rate. Pre-filled from provider preset.")
+                with c5:
+                    min_pmt_input = st.number_input("Min payment (% of balance)",
+                                                    min_value=0.0, max_value=100.0, step=1.0,
+                                                    value=float(preset["min_pmt_pct"]),
+                                                    help="0 for installment apps with fixed payment plans")
+                with c6:
+                    due_day_input = st.number_input("Statement due day (1-28)",
+                                                    min_value=0, max_value=28, step=1, value=0,
+                                                    help="Day of month payment is due. Set 0 if not applicable.")
+
+                notes_input = st.text_input("Notes (optional)",
+                                            placeholder="e.g. 'Cashback 1%, no FX fee, expires 12/2027'")
+
+                submitted = st.form_submit_button("➕ Add Account", type="primary",
+                                                  use_container_width=True)
+                if submitted:
+                    final_provider = (custom_name.strip() if provider_choice == "Other / Custom"
+                                      else provider_choice)
+                    if not final_provider:
+                        st.error("Provider name is required.")
+                    elif limit_input <= 0:
+                        st.error("Credit limit must be greater than 0.")
+                    else:
+                        accounts.append({
+                            "id":            f"acc_{int(time.time() * 1000)}",
+                            "provider":      final_provider,
+                            "nickname":      nickname.strip(),
+                            "kind":          kind_choice,
+                            "currency":      currency_choice,
+                            "limit":         float(limit_input),
+                            "balance":       float(balance_input),
+                            "apr":           float(apr_input),
+                            "min_pmt_pct":   float(min_pmt_input),
+                            "due_day":       int(due_day_input) if due_day_input else None,
+                            "notes":         notes_input.strip(),
+                            "color":         preset["color"],
+                            "added_on":      today_dt.isoformat(),
+                        })
+                        save_data(data)
+                        st.success(f"✅ Added {final_provider}!")
+                        st.rerun()
+
+        if not accounts:
+            st.markdown(
+                "<div style='background:var(--bg-surface);border:1px dashed var(--border-2);"
+                "border-radius:10px;padding:20px;text-align:center;color:var(--text-muted);font-size:0.9rem;"
+                "margin-top:14px;'>"
+                "📭 No accounts added yet. Use the form above to add your first card or installment program."
+                "</div>",
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown("### Your accounts")
+            # Sort: credit cards first, then installment apps
+            sorted_accounts = sorted(accounts, key=lambda a: (a.get("kind") != "credit_card", a["provider"]))
+            for acc in sorted_accounts:
+                acc_limit = float(acc.get("limit", 0) or 0)
+                acc_bal   = float(acc.get("balance", 0) or 0)
+                acc_util  = (acc_bal / acc_limit * 100) if acc_limit > 0 else 0
+                avail     = max(0, acc_limit - acc_bal)
+                kind_label = "💳 Card" if acc.get("kind") == "credit_card" else "📲 Installment"
+                util_color = ("#22c55e" if acc_util <= 30 else
+                              "#f59e0b" if acc_util <= 60 else "#ef4444")
+
+                cols = st.columns([4, 2, 2, 2, 1])
+                with cols[0]:
+                    display_name = acc["provider"]
+                    if acc.get("nickname"):
+                        display_name += f" · {acc['nickname']}"
+                    st.markdown(
+                        f"<div style='background:var(--bg-surface);border:1px solid var(--border-2);"
+                        f"border-left:4px solid {acc.get('color', '#475569')};border-radius:10px;"
+                        f"padding:10px 14px;'>"
+                        f"<b>{display_name}</b><br>"
+                        f"<span style='color:var(--text-muted);font-size:0.78rem;'>"
+                        f"{kind_label} · APR {acc.get('apr', 0):.1f}%"
+                        f"{' · Due day ' + str(acc['due_day']) if acc.get('due_day') else ''}"
+                        f"</span></div>",
+                        unsafe_allow_html=True,
+                    )
+                with cols[1]:
+                    st.markdown(
+                        f"<div style='padding:8px 0;text-align:center;'>"
+                        f"<div style='color:var(--text-dim);font-size:0.7rem;text-transform:uppercase;'>Balance</div>"
+                        f"<div style='color:var(--text);font-family:JetBrains Mono,monospace;font-weight:700;'>"
+                        f"{acc_bal:,.0f} {acc.get('currency', 'EGP')}</div></div>",
+                        unsafe_allow_html=True,
+                    )
+                with cols[2]:
+                    st.markdown(
+                        f"<div style='padding:8px 0;text-align:center;'>"
+                        f"<div style='color:var(--text-dim);font-size:0.7rem;text-transform:uppercase;'>Available</div>"
+                        f"<div style='color:#22c55e;font-family:JetBrains Mono,monospace;font-weight:700;'>"
+                        f"{avail:,.0f} {acc.get('currency', 'EGP')}</div></div>",
+                        unsafe_allow_html=True,
+                    )
+                with cols[3]:
+                    st.markdown(
+                        f"<div style='padding:8px 0;text-align:center;'>"
+                        f"<div style='color:var(--text-dim);font-size:0.7rem;text-transform:uppercase;'>Utilization</div>"
+                        f"<div style='color:{util_color};font-family:JetBrains Mono,monospace;font-weight:700;'>"
+                        f"{acc_util:.1f}%</div></div>",
+                        unsafe_allow_html=True,
+                    )
+                with cols[4]:
+                    if st.button("🗑️", key=f"acc_del_{acc['id']}", help="Remove this account"):
+                        credit["accounts"] = [a for a in accounts if a["id"] != acc["id"]]
+                        save_data(data)
+                        st.rerun()
+
+                # Quick balance update inline
+                with st.expander(f"  ↳ Update balance for {acc['provider']}", expanded=False):
+                    upd_c1, upd_c2 = st.columns([3, 1])
+                    with upd_c1:
+                        new_bal = st.number_input(
+                            "New current balance",
+                            min_value=0.0, step=100.0,
+                            value=float(acc.get("balance", 0)),
+                            key=f"acc_balupd_{acc['id']}",
+                        )
+                    with upd_c2:
+                        st.markdown("<div style='height:28px;'></div>", unsafe_allow_html=True)
+                        if st.button("Save", key=f"acc_save_{acc['id']}", use_container_width=True):
+                            for a in accounts:
+                                if a["id"] == acc["id"]:
+                                    a["balance"] = float(new_bal)
+                                    break
+                            save_data(data)
+                            st.success("Balance updated.")
+                            st.rerun()
+
+    st.markdown("---")
+    st.markdown("### 🏛️ Detailed QNB & EGBank Tracking")
+    st.caption("Full transaction-level tracking with statement cycles, revolving interest, and installment plans for QNB and EGBank cards. For other banks/programs, use the **🏦 My Accounts** tab above.")
 
     # ── Bank Rate Configs ──
     BANKS = {
@@ -5257,7 +6221,7 @@ Provide a thoughtful 3-paragraph reflection:
 
 Tone: warm, honest, like a trusted mentor. Max 150 words."""
                         with st.spinner("🤖 Reflecting..."):
-                            ai_r = call_gemini(j_prompt, max_tokens=300, temperature=0.8)
+                            ai_r = call_gemini(j_prompt, max_tokens=1200, temperature=0.8)
                         if "journal" not in data: data["journal"] = {}
                         data["journal"][today_j] = {
                             "text": j_text, "mood": mood_val, "wins": j_wins,
@@ -5559,7 +6523,7 @@ For each meal provide:
 Format each meal clearly with emoji. Keep suggestions practical, delicious, and realistic for an Egyptian kitchen.
 If suggesting Egyptian dishes, include them — they are always welcome."""
                 with st.spinner("🤖 Preparing your meal plan..."):
-                    suggestion = call_gemini(prompt, max_tokens=800, temperature=0.8)
+                    suggestion = call_gemini(prompt, max_tokens=2500, temperature=0.8)
                 st.markdown(f"""
                 <div style='background:#0d1b2a;border:1px solid #22c55e44;border-radius:12px;padding:18px;margin-top:8px;'>
                     <div style='color:#22c55e;font-size:0.8rem;font-weight:600;margin-bottom:10px;'>🤖 AI Chef's Recommendations</div>
@@ -5625,7 +6589,7 @@ If suggesting Egyptian dishes, include them — they are always welcome."""
                     recent_names = [m.get("name","") for m in log_all[-10:]]
                     p = f"Based on these recent meals: {', '.join(recent_names)}, generate a clean, grouped shopping list with sections (Proteins, Vegetables, Grains, Dairy, Other). Keep it concise and practical."
                     with st.spinner("Building list..."):
-                        shop = call_gemini(p, max_tokens=400)
+                        shop = call_gemini(p, max_tokens=1500)
                     st.markdown(f"<div style='background:#0d1b2a;border:1px solid #3b82f6;border-radius:10px;padding:14px;white-space:pre-wrap;color:#e2e8f0;font-size:0.86rem;'>{shop}</div>", unsafe_allow_html=True)
         else:
             st.info("No meals logged yet. Use the form above to start tracking.")
@@ -5659,7 +6623,7 @@ If suggesting Egyptian dishes, include them — they are always welcome."""
                     fav_detail = next((f for f in favs if f.get("name") == sel_fav), {})
                     p = f"Give me the full recipe for '{sel_fav}'. Include: ingredients with quantities for 2 servings, step-by-step instructions, cooking time, and a nutrition estimate per serving. Make it practical and clear."
                     with st.spinner("Preparing recipe..."):
-                        recipe = call_gemini(p, max_tokens=600)
+                        recipe = call_gemini(p, max_tokens=2000)
                     st.markdown(f"<div style='background:#0d1b2a;border:1px solid #facc1544;border-radius:10px;padding:16px;white-space:pre-wrap;color:#e2e8f0;font-size:0.86rem;line-height:1.7;'>{recipe}</div>", unsafe_allow_html=True)
         else:
             st.info("No favorites yet. Log a meal and check '⭐ Add to Favorites'.")
@@ -5770,7 +6734,7 @@ Practice type requested: {practice_type.split(" ",1)[1]}
 
 Keep it engaging, practical, and appropriate for {level} level."""
                 with st.spinner(f"🤖 Preparing {target_lang} practice..."):
-                    practice_content = call_gemini(p, max_tokens=700, temperature=0.75)
+                    practice_content = call_gemini(p, max_tokens=2500, temperature=0.75)
                 st.session_state["last_practice"] = practice_content
                 st.session_state["last_practice_type"] = practice_type
 
@@ -5837,7 +6801,7 @@ Keep it engaging, practical, and appropriate for {level} level."""
                          f"For each: {target_lang} word | {native_lang} translation | pronunciation (romanized) | one short example sentence. "
                          f"Format as a clean list, one word per line with | separator.")
                     with st.spinner("Generating words..."):
-                        word_set = call_gemini(p, max_tokens=500)
+                        word_set = call_gemini(p, max_tokens=1500)
                     # Parse and auto-add
                     added = 0
                     for line in word_set.strip().split("\n"):
@@ -5929,7 +6893,7 @@ Keep it engaging, practical, and appropriate for {level} level."""
                     f"Keep it encouraging and appropriate for {level} level."
                 )
                 with st.spinner("Generating quiz..."):
-                    quiz_content = call_gemini(p, max_tokens=600)
+                    quiz_content = call_gemini(p, max_tokens=2000)
                 st.session_state["active_quiz"] = quiz_content
                 st.session_state["quiz_answers_shown"] = False
 
@@ -6014,8 +6978,16 @@ Keep it engaging, practical, and appropriate for {level} level."""
                     font=dict(color="#94a3b8"), margin=dict(l=0,r=0,t=30,b=0))
                 st.plotly_chart(fig_lang, use_container_width=True)
 
-            st.dataframe(df_sess[["date","type","topic","duration_min","words_learned","difficulty"]].head(20),
-                use_container_width=True, hide_index=True)
+            # Show only the columns that actually exist on this user's session data —
+            # older sessions or fresh users may not have every field. We define the
+            # preferred order and filter to whatever's present.
+            preferred_cols = ["date", "type", "topic", "duration_min", "words_learned", "difficulty"]
+            available_cols = [c for c in preferred_cols if c in df_sess.columns]
+            if available_cols:
+                st.dataframe(df_sess[available_cols].head(20),
+                    use_container_width=True, hide_index=True)
+            else:
+                st.info("No structured session data yet. Log a session above to see your history table.")
 
     # ── TAB 5: SETTINGS ──
     with lang_t5:
@@ -6070,7 +7042,7 @@ Please:
 
 Keep it educational and encouraging."""
                 with st.spinner("Analysing text..."):
-                    analysis = call_gemini(p, max_tokens=700)
+                    analysis = call_gemini(p, max_tokens=2500)
                 st.markdown(f"<div style='background:#0d1b2a;border:1px solid #3b82f644;border-radius:10px;padding:16px;white-space:pre-wrap;color:#e2e8f0;font-size:0.86rem;line-height:1.7;'>{analysis}</div>", unsafe_allow_html=True)
 
 
@@ -6184,93 +7156,290 @@ elif st.session_state['page'] == 'Reports':
         st.subheader(f"Report for {selected_date.strftime('%B %d, %Y')}")
 
         def gen_report():
-            fig, ax = plt.subplots(figsize=(8, 9), dpi=150)
-            bg = "#080c14"
-            fig.patch.set_facecolor(bg)
-            ax.set_facecolor(bg)
-            ax.axis('off')
+            # ── Brighter, friendlier palette ──
+            # Soft warm gradient background, vibrant accent colors per metric.
+            BG_TOP    = "#1e293b"
+            BG_BOT    = "#0f172a"
+            CARD_BG   = "#1e2740"
+            CARD_BG2  = "#252e4a"
+
+            ACCENT    = "#22c55e"   # brand green
+            BLUE      = "#60a5fa"
+            PURPLE    = "#a78bfa"
+            PINK      = "#f472b6"
+            ORANGE    = "#fb923c"
+            YELLOW    = "#fcd34d"
+            RED       = "#f87171"
+            TEAL      = "#5eead4"
+
+            TEXT_HI   = "#f1f5f9"
+            TEXT_MID  = "#cbd5e1"
+            TEXT_LO   = "#94a3b8"
+            TEXT_DIM  = "#64748b"
+
+            fig, ax = plt.subplots(figsize=(8.5, 11), dpi=150)
+            ax.set_xlim(0, 100); ax.set_ylim(0, 130)
+            ax.axis("off")
+
+            # ── Vertical gradient background ──
+            for i in range(130):
+                t = i / 130
+                # Mix between BG_TOP and BG_BOT
+                r = int(int(BG_TOP[1:3], 16) * (1 - t) + int(BG_BOT[1:3], 16) * t)
+                g = int(int(BG_TOP[3:5], 16) * (1 - t) + int(BG_BOT[3:5], 16) * t)
+                b = int(int(BG_TOP[5:7], 16) * (1 - t) + int(BG_BOT[5:7], 16) * t)
+                ax.add_patch(mpatches.Rectangle((0, i), 100, 1.05,
+                                                 facecolor=f"#{r:02x}{g:02x}{b:02x}",
+                                                 edgecolor="none", zorder=0))
+            fig.patch.set_facecolor(BG_BOT)
 
             d = data["history"].get(current_day_str, {})
             done_count = sum(1 for k in ["t1_ds", "t2_de", "t3_gym", "t4_life"] if d.get(k))
-            pct = int((done_count / 4) * 100)
-            p_done = sum(1 for v in d.get("prayers", {}).values() if v)
-            mood = d.get("mood", 3)
-            energy = d.get("energy", 3)
+            pct       = int((done_count / 4) * 100)
+            p_done    = sum(1 for v in d.get("prayers", {}).values() if v)
+            mood      = d.get("mood", 3)
+            energy    = d.get("energy", 3)
 
-            accent = "#3b82f6"
-            green = "#22c55e"
-            orange = "#fb923c"
-            muted = "#475569"
+            # Compute current streak
+            streak = 0
+            d_check = selected_date
+            while True:
+                key = d_check.strftime("%Y-%m-%d")
+                day_h = data["history"].get(key, {})
+                if any(day_h.get(t) for t in ["t1_ds", "t2_de", "t3_gym", "t4_life"]):
+                    streak += 1
+                    d_check -= datetime.timedelta(days=1)
+                else:
+                    break
 
-            # Header
-            plt.text(0.05, 0.96, "THRIVO", fontsize=9, color=accent, weight='bold', transform=ax.transAxes, alpha=0.8)
-            plt.text(0.05, 0.90, "DAILY REPORT", fontsize=26, color='white', weight='bold', transform=ax.transAxes)
-            plt.text(0.05, 0.85, selected_date.strftime("%A, %B %d, %Y").upper(), fontsize=9, color=muted, transform=ax.transAxes)
+            # ── Header ──
+            ax.text(6, 122, "THRIVO", fontsize=10, color=ACCENT,
+                    weight="bold")
+            ax.text(6, 117, "Daily Report", fontsize=24, color=TEXT_HI, weight="bold")
+            ax.text(6, 113, selected_date.strftime("%A · %B %d, %Y"),
+                    fontsize=11, color=TEXT_LO)
 
-            # Divider line
-            ax.axhline(y=0.83, xmin=0.05, xmax=0.95, color="#1e293b", linewidth=1)
+            # Streak badge in top-right
+            if streak > 0:
+                streak_x, streak_y = 78, 117
+                ax.add_patch(mpatches.FancyBboxPatch(
+                    (streak_x, streak_y), 16, 6,
+                    boxstyle="round,pad=0.1,rounding_size=2",
+                    facecolor=ORANGE, edgecolor="none", alpha=0.95))
+                ax.text(streak_x + 8, streak_y + 3, f"{streak} day streak",
+                        ha="center", va="center", fontsize=9.5,
+                        color="#0f172a", weight="bold")
 
-            # Big metrics
-            # Tasks
-            task_color = green if pct >= 75 else orange if pct >= 50 else "#ef4444"
-            plt.text(0.05, 0.75, f"{pct}%", fontsize=44, color=task_color, weight='bold', transform=ax.transAxes)
-            plt.text(0.05, 0.69, "TASKS", fontsize=8, color=muted, transform=ax.transAxes)
+            # ── 3 Hero Cards: Tasks / Prayers / Mood ──
+            card_y     = 92
+            card_h     = 16
+            card_w     = 28
+            card_gap   = 4
+            cards_x    = 6
 
-            # Prayers
-            pray_color = green if p_done == 5 else orange if p_done >= 3 else "#ef4444"
-            plt.text(0.38, 0.75, f"{p_done}/5", fontsize=44, color=pray_color, weight='bold', transform=ax.transAxes)
-            plt.text(0.38, 0.69, "PRAYERS", fontsize=8, color=muted, transform=ax.transAxes)
+            # Card 1: TASKS
+            task_color = ACCENT if pct >= 75 else YELLOW if pct >= 50 else RED
+            ax.add_patch(mpatches.FancyBboxPatch(
+                (cards_x, card_y), card_w, card_h,
+                boxstyle="round,pad=0.1,rounding_size=2.5",
+                facecolor=CARD_BG, edgecolor=task_color, linewidth=2))
+            # Colored side accent
+            ax.add_patch(mpatches.Rectangle(
+                (cards_x, card_y), 1.2, card_h, facecolor=task_color, edgecolor="none"))
+            ax.text(cards_x + 3, card_y + card_h - 2.5, "TASKS",
+                    fontsize=8, color=TEXT_DIM, weight="bold")
+            ax.text(cards_x + 3, card_y + 6, f"{pct}%",
+                    fontsize=28, color=task_color, weight="bold",
+                    family="monospace")
+            ax.text(cards_x + 3, card_y + 2.5, f"{done_count} of 4 protocols",
+                    fontsize=8, color=TEXT_LO)
 
-            # Mood
-            mood_emojis_r = {1: "😞", 2: "😕", 3: "😐", 4: "😊", 5: "🔥"}
-            plt.text(0.68, 0.75, f"{mood_emojis_r.get(mood,'😐')}", fontsize=36, transform=ax.transAxes)
-            plt.text(0.68, 0.69, "MOOD", fontsize=8, color=muted, transform=ax.transAxes)
+            # Card 2: PRAYERS
+            cards_x2 = cards_x + card_w + card_gap
+            pray_color = ACCENT if p_done == 5 else YELLOW if p_done >= 3 else RED
+            ax.add_patch(mpatches.FancyBboxPatch(
+                (cards_x2, card_y), card_w, card_h,
+                boxstyle="round,pad=0.1,rounding_size=2.5",
+                facecolor=CARD_BG, edgecolor=pray_color, linewidth=2))
+            ax.add_patch(mpatches.Rectangle(
+                (cards_x2, card_y), 1.2, card_h, facecolor=pray_color, edgecolor="none"))
+            ax.text(cards_x2 + 3, card_y + card_h - 2.5, "PRAYERS",
+                    fontsize=8, color=TEXT_DIM, weight="bold")
+            ax.text(cards_x2 + 3, card_y + 6, f"{p_done}/5",
+                    fontsize=28, color=pray_color, weight="bold",
+                    family="monospace")
+            label = "Complete" if p_done == 5 else "In progress"
+            ax.text(cards_x2 + 3, card_y + 2.5, label, fontsize=8, color=TEXT_LO)
 
-            # Divider
-            ax.axhline(y=0.66, xmin=0.05, xmax=0.95, color="#1e293b", linewidth=1)
+            # Card 3: MOOD — colored gradient based on mood level
+            cards_x3 = cards_x2 + card_w + card_gap
+            mood_palette = {
+                1: (RED,    "#7f1d1d", "Tough day"),
+                2: (ORANGE, "#7c2d12", "Meh"),
+                3: (YELLOW, "#713f12", "Neutral"),
+                4: (TEAL,   "#134e4a", "Good"),
+                5: (PURPLE, "#3b0764", "Excellent"),
+            }
+            mood_main, mood_dark, mood_label = mood_palette.get(mood, mood_palette[3])
+            mood_emoji_map = {1: "low", 2: "down", 3: "ok", 4: "up", 5: "great"}
+            ax.add_patch(mpatches.FancyBboxPatch(
+                (cards_x3, card_y), card_w, card_h,
+                boxstyle="round,pad=0.1,rounding_size=2.5",
+                facecolor=mood_dark, edgecolor=mood_main, linewidth=2))
+            ax.add_patch(mpatches.Rectangle(
+                (cards_x3, card_y), 1.2, card_h, facecolor=mood_main, edgecolor="none"))
+            ax.text(cards_x3 + 3, card_y + card_h - 2.5, "MOOD",
+                    fontsize=8, color=TEXT_DIM, weight="bold")
+            # Big circle showing mood level on a 1-5 dial
+            circle_cx, circle_cy = cards_x3 + card_w - 7.5, card_y + card_h / 2
+            ax.add_patch(mpatches.Circle((circle_cx, circle_cy), 4.5,
+                                          facecolor=mood_main, edgecolor="none", alpha=0.95))
+            ax.text(circle_cx, circle_cy, str(mood),
+                    ha="center", va="center", fontsize=22,
+                    color="#0f172a", weight="bold", family="monospace")
+            ax.text(cards_x3 + 3, card_y + 7, mood_label,
+                    fontsize=14, color=mood_main, weight="bold")
+            ax.text(cards_x3 + 3, card_y + 3.5, f"{mood}/5 — {mood_emoji_map.get(mood, 'ok')}",
+                    fontsize=8, color=TEXT_LO)
 
-            # Tasks log
-            plt.text(0.05, 0.62, "PROTOCOL", fontsize=8, color=muted, weight='bold', transform=ax.transAxes)
-            y_pos = 0.57
-            task_labels = [("Deep Work", "t1_ds"), ("German Study", "t2_de"), ("Gym", "t3_gym"), ("Family", "t4_life")]
-            for lbl, k in task_labels:
+            # ── Energy Meter ──
+            energy_y = 82
+            ax.text(cards_x, energy_y + 2, "ENERGY", fontsize=8,
+                    color=TEXT_DIM, weight="bold")
+            # Background bar
+            ax.add_patch(mpatches.FancyBboxPatch(
+                (cards_x, energy_y - 2.5), 88, 3.5,
+                boxstyle="round,pad=0,rounding_size=1.5",
+                facecolor="#1e293b", edgecolor="none"))
+            # Fill bar
+            energy_pct = (energy / 5)
+            energy_color = (RED if energy <= 2 else
+                            YELLOW if energy <= 3 else
+                            ACCENT if energy >= 4 else BLUE)
+            ax.add_patch(mpatches.FancyBboxPatch(
+                (cards_x, energy_y - 2.5), 88 * energy_pct, 3.5,
+                boxstyle="round,pad=0,rounding_size=1.5",
+                facecolor=energy_color, edgecolor="none", alpha=0.95))
+            ax.text(cards_x + 88 * energy_pct + 1.5, energy_y - 0.8,
+                    f"{energy}/5",
+                    fontsize=10, color=TEXT_HI, weight="bold", family="monospace")
+
+            # ── Two columns: PROTOCOLS + PRAYER LOG ──
+            col_y    = 70
+            col_h    = 33
+            col_w    = 42
+
+            # PROTOCOLS card
+            ax.add_patch(mpatches.FancyBboxPatch(
+                (cards_x, col_y - col_h + 5), col_w, col_h,
+                boxstyle="round,pad=0.1,rounding_size=2",
+                facecolor=CARD_BG2, edgecolor="#334155", linewidth=1))
+            ax.text(cards_x + 2, col_y + 2, "🎯  PROTOCOLS", fontsize=10,
+                    color=BLUE, weight="bold")
+            task_labels = [
+                ("Deep Work",     "t1_ds",  "📚"),
+                ("German Study",  "t2_de",  "🇩🇪"),
+                ("Gym",           "t3_gym", "💪"),
+                ("Family",        "t4_life","❤️"),
+            ]
+            ty = col_y - 3
+            for lbl, k, em in task_labels:
                 is_done = d.get(k, False)
-                c = green if is_done else "#1e293b"
-                sym = "■" if is_done else "□"
-                plt.text(0.05, y_pos, f"{sym}  {lbl}", fontsize=11, color=c if is_done else "#334155", transform=ax.transAxes)
-                y_pos -= 0.065
+                # Status pill
+                status_color = ACCENT if is_done else "#475569"
+                status_text  = "DONE" if is_done else "skip"
+                ax.add_patch(mpatches.Circle((cards_x + 4, ty + 1), 1.2,
+                                              facecolor=status_color, edgecolor="none"))
+                if is_done:
+                    ax.text(cards_x + 4, ty + 1, "✓",
+                            ha="center", va="center", fontsize=8,
+                            color="#0f172a", weight="bold")
+                ax.text(cards_x + 8, ty + 1, lbl, fontsize=11,
+                        color=TEXT_HI if is_done else TEXT_DIM,
+                        weight="bold" if is_done else "normal",
+                        va="center")
+                # Status text on right
+                ax.text(cards_x + col_w - 3, ty + 1, status_text,
+                        fontsize=8, color=status_color,
+                        weight="bold", ha="right", va="center")
+                ty -= 6
 
-            # Prayer log
-            plt.text(0.55, 0.62, "PRAYERS", fontsize=8, color=muted, weight='bold', transform=ax.transAxes)
-            y_pos2 = 0.57
-            for p in ["Fajr", "Dhuhr", "Asr", "Maghrib", "Isha"]:
+            # PRAYER LOG card
+            cards_x_pr = cards_x + col_w + 4
+            ax.add_patch(mpatches.FancyBboxPatch(
+                (cards_x_pr, col_y - col_h + 5), col_w, col_h,
+                boxstyle="round,pad=0.1,rounding_size=2",
+                facecolor=CARD_BG2, edgecolor="#334155", linewidth=1))
+            ax.text(cards_x_pr + 2, col_y + 2, "🕌  PRAYERS", fontsize=10,
+                    color=PURPLE, weight="bold")
+            ty = col_y - 3
+            prayer_colors = [TEAL, BLUE, YELLOW, ORANGE, PURPLE]
+            for i, p in enumerate(["Fajr", "Dhuhr", "Asr", "Maghrib", "Isha"]):
                 done_p = d.get("prayers", {}).get(p, False)
-                col_p = green if done_p else "#334155"
-                sym = "■" if done_p else "□"
-                plt.text(0.55, y_pos2, f"{sym}  {p}", fontsize=11, color=col_p, transform=ax.transAxes)
-                y_pos2 -= 0.052
+                pc = prayer_colors[i] if done_p else "#475569"
+                ax.add_patch(mpatches.Circle((cards_x_pr + 4, ty + 1), 1.2,
+                                              facecolor=pc, edgecolor="none"))
+                if done_p:
+                    ax.text(cards_x_pr + 4, ty + 1, "✓",
+                            ha="center", va="center", fontsize=8,
+                            color="#0f172a", weight="bold")
+                ax.text(cards_x_pr + 8, ty + 1, p, fontsize=11,
+                        color=TEXT_HI if done_p else TEXT_DIM,
+                        weight="bold" if done_p else "normal",
+                        va="center")
+                ty -= 5
 
-            # Note
+            # ── Note card (colorful) ──
             note = d.get("note", "")
             if note:
-                ax.axhline(y=0.28, xmin=0.05, xmax=0.95, color="#1e293b", linewidth=1)
-                plt.text(0.05, 0.25, "NOTE", fontsize=8, color=muted, weight='bold', transform=ax.transAxes)
-                # Wrap note text
-                note_short = (note[:120] + "...") if len(note) > 120 else note
-                plt.text(0.05, 0.20, note_short, fontsize=9, color="#94a3b8", transform=ax.transAxes, wrap=True)
+                note_y = 28
+                note_h = 12
+                ax.add_patch(mpatches.FancyBboxPatch(
+                    (cards_x, note_y - note_h + 5), 88, note_h,
+                    boxstyle="round,pad=0.1,rounding_size=2",
+                    facecolor=CARD_BG, edgecolor=PINK, linewidth=2))
+                ax.add_patch(mpatches.Rectangle(
+                    (cards_x, note_y - note_h + 5), 1.2, note_h,
+                    facecolor=PINK, edgecolor="none"))
+                ax.text(cards_x + 3, note_y + 2.5, "✍️  NOTE", fontsize=9,
+                        color=PINK, weight="bold")
+                # Word-wrap manually — split into ~70 char lines
+                note_clean = note.replace("\n", " ").strip()
+                if len(note_clean) > 220:
+                    note_clean = note_clean[:217] + "..."
+                # Simple wrap
+                words = note_clean.split()
+                lines, line = [], ""
+                for w in words:
+                    if len(line) + len(w) + 1 <= 75:
+                        line = (line + " " + w).strip()
+                    else:
+                        lines.append(line)
+                        line = w
+                if line:
+                    lines.append(line)
+                lines = lines[:3]  # max 3 lines
+                ny = note_y - 2
+                for ln in lines:
+                    ax.text(cards_x + 3, ny, ln, fontsize=9.5, color=TEXT_MID,
+                            family="sans-serif")
+                    ny -= 3.2
 
-            # Footer
-            ax.axhline(y=0.08, xmin=0.05, xmax=0.95, color="#1e293b", linewidth=1)
-            plt.text(0.05, 0.04, f"Generated {datetime.date.today().strftime('%Y-%m-%d')}  •  Thrivo", fontsize=7, color=muted, transform=ax.transAxes)
+            # ── Footer ──
+            ax.text(50, 6, f"Generated {datetime.date.today().strftime('%Y-%m-%d')}",
+                    ha="center", fontsize=8, color=TEXT_DIM)
+            ax.text(50, 3, "thrivo.app · Grow with intention",
+                    ha="center", fontsize=7, color=TEXT_DIM, alpha=0.7)
 
             return fig
 
         fig = gen_report()
         st.pyplot(fig)
         buf = io.BytesIO()
-        fig.savefig(buf, format="png", bbox_inches='tight', facecolor="#080c14")
+        fig.savefig(buf, format="png", bbox_inches='tight', facecolor="#0f172a")
         st.download_button("📥 Download Card", data=buf.getvalue(),
-                           file_name=f"report_{current_day_str}.png", mime="image/png")
+                           file_name=f"report_{current_day_str}.png", mime="image/png",
+                           use_container_width=True, type="primary")
 
     with tab_weekly:
         st.subheader("Weekly Performance Summary")
@@ -6936,11 +8105,26 @@ elif st.session_state['page'] == 'FinanceDash':
     assets = finance.get("assets", [])
     total_cash_assets = sum(float(a.get("amount", 0) or 0) for a in assets)
 
-    # Credit exposure
+    # Credit exposure — sum legacy QNB/EGBank balances PLUS user-added accounts
     credit_balances = credit.get("balances", {})
-    total_credit_used = sum(float(v or 0) for v in credit_balances.values())
+    legacy_balance = sum(float(v or 0) for v in credit_balances.values())
     credit_limits = credit.get("limits", {})
-    total_credit_limit = sum(float(v or 0) for v in credit_limits.values())
+    legacy_limit = sum(float(v or 0) for v in credit_limits.values())
+
+    # User-added accounts (Valu, Souhoola, other cards) — convert to EGP
+    user_accounts = credit.get("accounts", [])
+    _usd_rate_for_credit = _resolve_usd_rate(data)
+    accounts_balance = sum(
+        amount_to_egp(a.get("balance", 0), a.get("currency", "EGP"), _usd_rate_for_credit)
+        for a in user_accounts
+    )
+    accounts_limit = sum(
+        amount_to_egp(a.get("limit", 0), a.get("currency", "EGP"), _usd_rate_for_credit)
+        for a in user_accounts
+    )
+
+    total_credit_used = legacy_balance + accounts_balance
+    total_credit_limit = legacy_limit + accounts_limit
     credit_util = (total_credit_used / total_credit_limit * 100) if total_credit_limit > 0 else 0
 
     # Stock value (from saved price history)
@@ -6963,12 +8147,38 @@ elif st.session_state['page'] == 'FinanceDash':
     # Net worth
     net_worth = total_cash_assets + total_stock_value - total_credit_used
 
-    # Monthly cash flow
+    # Monthly cash flow — convert USD income to EGP using live rate.
+    # FIX: use _resolve_usd_rate(data) so we pick up the SAME rate the
+    # Finance tab uses — including the user's own price_history fallback.
+    # Previously the bare get_usd_egp_rate_global() would land on 50.0 if
+    # the cron hadn't run, even when the Finance tab had a fresh live rate.
+    usd_rate = _resolve_usd_rate(data)
     incomes = finance.get("income", [])
-    total_monthly_income = sum(float(i.get("amount", 0) or 0) for i in incomes)
+    total_monthly_income = sum(
+        amount_to_egp(i.get("amount", 0), i.get("currency", "EGP"), usd_rate)
+        for i in incomes
+    )
     monthly_exp = finance.get("expenses_monthly", [])
-    total_monthly_exp = sum(float(e.get("amount", 0) or 0) for e in monthly_exp)
+    total_monthly_exp = sum(
+        amount_to_egp(e.get("amount", 0), e.get("currency", "EGP"), usd_rate)
+        for e in monthly_exp
+    )
     monthly_cashflow = total_monthly_income - total_monthly_exp
+
+    # Show the rate used so users see why a USD salary became a different EGP number
+    has_usd = any((i.get("currency", "EGP") or "").upper() == "USD"
+                  for i in incomes + monthly_exp)
+    if has_usd:
+        rate_source = "live" if usd_rate != 50.0 else "fallback (live source unreachable)"
+        st.markdown(
+            f"<div style='background:var(--bg-surface);border:1px solid var(--border-2);"
+            f"border-radius:8px;padding:8px 14px;margin-bottom:12px;font-size:0.82rem;'>"
+            f"💱 USD income/expenses converted to EGP at "
+            f"<b style='color:var(--info);font-family:JetBrains Mono,monospace;'>"
+            f"{usd_rate:,.2f}</b> EGP/USD ({rate_source})"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
 
     # ── Top row: 4 hero metrics ──
     st.markdown("### 📊 Overview")
@@ -7173,203 +8383,552 @@ elif st.session_state['page'] == 'FinanceDash':
 
 # ==========================================
 # PAGE: SMART BUYING CALENDAR (v10 new — Pro+ feature)
+
+
+# ==========================================
+# PAGE: SMART BUYING CALENDAR (v10.1 — UX redesign)
 # ==========================================
 elif st.session_state['page'] == 'BuyTime':
-    st.title("🛒 Smart Buying Calendar")
-    st.caption("When to buy what in Egypt — curated retail patterns plus your own scraped price data, with sources cited.")
+    # ──────────────────────────────────────────────────────────────────
+    #  HERO — answers "should I buy something now?" without scrolling
+    # ──────────────────────────────────────────────────────────────────
+    today = datetime.date.today()
+    all_windows = buy_calendar.upcoming_windows(today=today, within_days=400)
+    active_now  = [w for w in all_windows if w["is_active"]]
+    next_30     = [w for w in all_windows if 0 < w["days_until"] <= 30]
+    next_90     = [w for w in all_windows if 0 < w["days_until"] <= 90]
 
-    # Honest disclaimer up top
+    # Hero header
     st.markdown(
-        "<div style='background:var(--bg-surface);border-left:3px solid var(--info);"
-        "border-radius:0 10px 10px 0;padding:10px 14px;margin:8px 0 16px;font-size:0.85rem;'>"
-        "💡 <b>How to use this:</b> The <b>Calendar</b> tab shows known Egyptian retail discount windows "
-        "(White Friday, Eid sales, end-of-season clearances) with cited sources. The <b>Price Trends</b> tab "
-        "analyzes the price history Thrivo's daily scraper has been collecting for you. "
-        "We mark every recommendation with a confidence level — and refuse to fake confidence "
-        "where the data doesn't support it."
-        "</div>",
+        f"""<div style='padding:8px 0 4px;'>
+            <h1 style='margin:0;display:flex;align-items:center;gap:10px;font-size:1.9rem;'>
+                🛒 Smart Buying
+                <span style='font-size:0.65rem;color:var(--text-faint);
+                    font-weight:500;background:var(--bg-surface);
+                    padding:3px 9px;border-radius:999px;border:1px solid var(--border-2);
+                    text-transform:uppercase;letter-spacing:0.08em;'>Pro</span>
+            </h1>
+            <p style='color:var(--text-muted);margin:4px 0 18px;font-size:0.95rem;'>
+                When to buy what in Egypt — backed by retail data, not guesses.
+            </p>
+        </div>""",
         unsafe_allow_html=True,
     )
 
-    tab_upcoming, tab_categories, tab_trends = st.tabs(
-        ["📅 Upcoming Windows", "🛍️ Browse by Category", "📊 Price Trends (your data)"]
-    )
+    # ── Hero card: ONE big actionable signal ──
+    if active_now:
+        # Pick the highest-confidence active window for the hero
+        hero = sorted(active_now, key=lambda w: (w["confidence"] != "HIGH", w["category_title"]))[0]
+        days_left = (hero["end"] - today).days
+        st.markdown(
+            f"""<div style='background:linear-gradient(135deg, rgba(34,197,94,0.12) 0%, rgba(34,197,94,0.04) 100%);
+                border:1px solid var(--accent);border-radius:16px;padding:20px 24px;margin-bottom:16px;
+                position:relative;overflow:hidden;'>
+                <div style='position:absolute;top:14px;right:18px;background:var(--accent);
+                    color:white;padding:4px 12px;border-radius:999px;font-size:0.72rem;
+                    font-weight:700;letter-spacing:0.05em;text-transform:uppercase;'>🔥 ACTIVE NOW</div>
+                <div style='font-size:0.78rem;color:var(--accent);font-weight:600;
+                    text-transform:uppercase;letter-spacing:0.1em;margin-bottom:4px;'>Buy in this window</div>
+                <h2 style='margin:0;font-size:1.5rem;color:var(--text-heading);'>
+                    {hero['category_icon']} {hero['category_title']}
+                </h2>
+                <div style='color:var(--text);font-size:0.96rem;margin:6px 0 10px;'>
+                    {hero['name']}
+                </div>
+                <div style='display:flex;gap:18px;flex-wrap:wrap;font-size:0.85rem;'>
+                    <span><b style='color:var(--accent);'>💸 {hero['discount_range']}</b></span>
+                    <span style='color:var(--text-muted);'>📅 {hero['label']}</span>
+                    <span style='color:var(--warn);font-weight:600;'>⏳ {days_left} day{'s' if days_left != 1 else ''} left</span>
+                </div>
+            </div>""",
+            unsafe_allow_html=True,
+        )
+    elif next_30:
+        soonest = next_30[0]
+        st.markdown(
+            f"""<div style='background:linear-gradient(135deg, rgba(59,130,246,0.10) 0%, rgba(59,130,246,0.04) 100%);
+                border:1px solid var(--info);border-radius:16px;padding:20px 24px;margin-bottom:16px;'>
+                <div style='font-size:0.78rem;color:var(--info);font-weight:600;
+                    text-transform:uppercase;letter-spacing:0.1em;margin-bottom:4px;'>⏰ Coming up soon</div>
+                <h2 style='margin:0;font-size:1.5rem;color:var(--text-heading);'>
+                    {soonest['category_icon']} {soonest['category_title']}
+                </h2>
+                <div style='color:var(--text);font-size:0.96rem;margin:6px 0 10px;'>
+                    {soonest['name']}
+                </div>
+                <div style='display:flex;gap:18px;flex-wrap:wrap;font-size:0.85rem;'>
+                    <span><b style='color:var(--info);'>💸 {soonest['discount_range']}</b></span>
+                    <span style='color:var(--text-muted);'>📅 {soonest['label']}</span>
+                    <span style='color:var(--accent);font-weight:600;'>🗓️ Starts in {soonest['days_until']} days</span>
+                </div>
+            </div>""",
+            unsafe_allow_html=True,
+        )
+    else:
+        st.info("No active or imminent shopping windows. Best to use the **Plan a purchase** tab below to find your category's next window.")
 
-    # ── HELPER: confidence pill ──
+    # Quick stats row
+    qc1, qc2, qc3, qc4 = st.columns(4)
+    qc1.metric("🔥 Active now",    len(active_now))
+    qc2.metric("📆 Next 30 days",  len(next_30))
+    qc3.metric("🗓️ Next 90 days",  len(next_90))
+    qc4.metric("📂 Categories",    len(buy_calendar.all_categories()))
+
+    st.markdown("<div style='height:6px;'></div>", unsafe_allow_html=True)
+
+    # ── Inline help expander (instead of buried docs) ──
+    with st.expander("💡 How to use this — and how much to trust it", expanded=False):
+        st.markdown("""
+        **What this is:** An Egypt-specific calendar of when retailers historically run discount campaigns,
+        plus statistical analysis of YOUR scraped price history. We cite every source so you can verify.
+
+        **Confidence levels — what they mean:**
+
+        - 🟢 **HIGH** — universally observed across major Egyptian retailers (Noon, Jumia, Amazon EG,
+          Sephora, Carrefour) every year. Nearly certain to repeat.
+        - 🟡 **MEDIUM** — strong general pattern, but discount depth or product mix varies by retailer/brand.
+        - 🔴 **LOW** — anecdotal or niche; we say so honestly so you decide.
+
+        **What we do NOT do:**
+
+        - We do NOT invent specific dates like "buy on Oct 23rd" — windows are real, days inside them aren't.
+        - We do NOT predict prices with AI. The Trends tab uses statistics on YOUR scraped data.
+        - We do NOT promise the discount range — it's the historical pattern, not a guarantee.
+
+        **Tabs at a glance:**
+
+        - 📅 **Calendar** — visual 12-month view of all windows.
+        - 🎯 **Plan a purchase** — pick what you want to buy, get personalized timing.
+        - ⭐ **My watchlist** — save planned purchases, see countdowns.
+        - 📊 **Price trends** — analysis of YOUR scraped data (gold, USD, BTC).
+        - 💰 **Savings log** — track money saved by buying in-window.
+        """)
+
+    # ──────────────────────────────────────────────────────────────────
+    #  TABS (renamed for clarity, fewer clicks deep)
+    # ──────────────────────────────────────────────────────────────────
+    tab_calendar, tab_plan, tab_watchlist, tab_trends, tab_savings = st.tabs([
+        "📅 Calendar",
+        "🎯 Plan a purchase",
+        "⭐ My watchlist",
+        "📊 Price trends",
+        "💰 Savings log",
+    ])
+
+    # Helpers shared across tabs
     def _conf_pill(conf: str) -> str:
         if conf == "HIGH":
-            return "<span style='background:rgba(34,197,94,0.15);color:#22c55e;border:1px solid #22c55e;padding:2px 8px;border-radius:999px;font-size:0.7rem;font-weight:600;'>● HIGH</span>"
+            return ("<span style='background:rgba(34,197,94,0.15);color:var(--accent);"
+                    "border:1px solid var(--accent);padding:2px 9px;border-radius:999px;"
+                    "font-size:0.68rem;font-weight:600;'>● HIGH</span>")
         if conf == "MEDIUM":
-            return "<span style='background:rgba(245,158,11,0.15);color:#f59e0b;border:1px solid #f59e0b;padding:2px 8px;border-radius:999px;font-size:0.7rem;font-weight:600;'>● MEDIUM</span>"
-        return "<span style='background:rgba(100,116,139,0.15);color:#64748b;border:1px solid #64748b;padding:2px 8px;border-radius:999px;font-size:0.7rem;font-weight:600;'>● LOW</span>"
+            return ("<span style='background:rgba(245,158,11,0.15);color:var(--warn);"
+                    "border:1px solid var(--warn);padding:2px 9px;border-radius:999px;"
+                    "font-size:0.68rem;font-weight:600;'>● MEDIUM</span>")
+        return ("<span style='background:rgba(100,116,139,0.15);color:var(--text-dim);"
+                "border:1px solid var(--text-dim);padding:2px 9px;border-radius:999px;"
+                "font-size:0.68rem;font-weight:600;'>● LOW</span>")
 
+    def _category_pick():
+        """Build options list — used in multiple tabs."""
+        keys = buy_calendar.all_categories()
+        return keys, {k: f"{buy_calendar.get_category(k)['icon']} {buy_calendar.get_category(k)['title']}"
+                      for k in keys}
 
     # ──────────────────────────────────────────────────────────────────
-    #  TAB 1 — UPCOMING WINDOWS
+    #  TAB 1 — CALENDAR (visual 12-month)
     # ──────────────────────────────────────────────────────────────────
-    with tab_upcoming:
-        # Top-level summary stats
-        windows = buy_calendar.upcoming_windows(within_days=365)
-        active_now = [w for w in windows if w["is_active"]]
-        soon = [w for w in windows if 0 < w["days_until"] <= 30]
+    with tab_calendar:
+        st.markdown("### 📅 Visual Calendar — Next 12 Months")
+        st.caption("Each band = one shopping window. Hover to see what's discounted.")
 
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Active right now",       len(active_now))
-        c2.metric("Starting in next 30d",   len(soon))
-        c3.metric("All upcoming",           len(windows))
+        # Build Plotly Gantt-style horizontal bar chart
+        gantt_rows = []
+        cat_colors = {
+            "iphone":               "#3b82f6",
+            "laptop":               "#8b5cf6",
+            "car":                  "#ef4444",
+            "summer_clothes":       "#f59e0b",
+            "winter_clothes":       "#06b6d4",
+            "gold":                 "#eab308",
+            "appliances":           "#22c55e",
+            "smart_home":           "#14b8a6",
+            "personal_care_beauty": "#ec4899",
+            "furniture":            "#a855f7",
+        }
+
+        for w in all_windows:
+            # Skip windows that are basically year-round (year-round oral care, gold tracker)
+            span_days = (w["end"] - w["start"]).days
+            if span_days > 200:
+                continue
+            gantt_rows.append({
+                "Category":   f"{w['category_icon']} {w['category_title']}",
+                "Window":     w["name"],
+                "Start":      w["start"],
+                "End":        w["end"],
+                "Confidence": w["confidence"],
+                "Discount":   w["discount_range"],
+                "color":      cat_colors.get(w["category_key"], "#64748b"),
+                "Active":     w["is_active"],
+            })
+
+        if gantt_rows:
+            df_g = pd.DataFrame(gantt_rows)
+            df_g = df_g.sort_values(["Category", "Start"])
+
+            fig = go.Figure()
+            for _, row in df_g.iterrows():
+                fig.add_trace(go.Scatter(
+                    x=[row["Start"], row["End"]],
+                    y=[row["Category"], row["Category"]],
+                    mode="lines",
+                    line=dict(color=row["color"],
+                              width=18 if row["Active"] else 14),
+                    opacity=1.0 if row["Active"] else 0.7,
+                    hovertemplate=(
+                        f"<b>{row['Window']}</b><br>"
+                        f"📅 {row['Start'].strftime('%b %d')} → {row['End'].strftime('%b %d')}<br>"
+                        f"💸 {row['Discount']}<br>"
+                        f"🎯 Confidence: {row['Confidence']}<extra></extra>"
+                    ),
+                    showlegend=False,
+                ))
+
+            # Today's vertical line
+            # NOTE: Plotly's add_vline annotation positioning calls float(sum(x))/len(x)
+            # on x-axis dates, which fails on plain datetime.date. We pass a datetime
+            # AND skip the auto-annotation, drawing the "Today" label as a separate
+            # add_annotation call so we control how the position is computed.
+            today_dt = datetime.datetime.combine(today, datetime.time(12, 0))
+            fig.add_vline(
+                x=today_dt,
+                line_dash="dash", line_color="#22c55e", line_width=2,
+            )
+            fig.add_annotation(
+                x=today_dt, y=1, yref="paper", yanchor="bottom",
+                text="<b>Today</b>", showarrow=False,
+                font=dict(color="#22c55e", size=11),
+                bgcolor="rgba(8,12,20,0.85)",
+                bordercolor="#22c55e", borderwidth=1, borderpad=3,
+            )
+
+            # Style
+            n_cats = df_g["Category"].nunique()
+            fig.update_layout(
+                height=max(280, 38 * n_cats + 80),
+                plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+                xaxis=dict(
+                    color="#94a3b8", showgrid=True, gridcolor="rgba(148,163,184,0.12)",
+                    type="date",
+                    tickformat="%b %Y",
+                    range=[today - datetime.timedelta(days=10),
+                           today + datetime.timedelta(days=380)],
+                ),
+                yaxis=dict(
+                    color="#cbd5e1", showgrid=False,
+                    autorange="reversed",
+                ),
+                margin=dict(l=0, r=20, t=20, b=20),
+                showlegend=False,
+                hoverlabel=dict(bgcolor="#0d1b2a", bordercolor="#1e3a5f",
+                                font_size=12, font_color="#e2e8f0"),
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+            # Legend below chart
+            legend_items = " ".join(
+                f"<span style='display:inline-flex;align-items:center;gap:5px;margin:0 12px 6px 0;font-size:0.75rem;color:var(--text-muted);'>"
+                f"<span style='display:inline-block;width:10px;height:10px;background:{c};border-radius:2px;'></span>"
+                f"{buy_calendar.get_category(k)['icon']} {buy_calendar.get_category(k)['title']}</span>"
+                for k, c in cat_colors.items() if buy_calendar.get_category(k)
+            )
+            st.markdown(f"<div style='margin-top:8px;'>{legend_items}</div>", unsafe_allow_html=True)
+        else:
+            st.info("No upcoming windows to display.")
 
         st.markdown("---")
 
-        # Active windows highlighted
-        if active_now:
-            st.markdown("### 🔥 Active Right Now")
+        # ── Active windows list (deep dive) ──
+        st.markdown("### 🔥 Active Right Now")
+        if not active_now:
+            st.info("No discount windows are active today. Check the **Plan a purchase** tab to see what's coming for the category you care about.")
+        else:
             for w in active_now:
-                _confidence = _conf_pill(w["confidence"])
+                days_left = (w["end"] - today).days
                 st.markdown(
                     f"<div style='background:var(--bg-surface);border:1px solid var(--accent);"
                     f"border-left:4px solid var(--accent);border-radius:12px;padding:14px 18px;margin-bottom:10px;'>"
-                    f"<div style='display:flex;justify-content:space-between;align-items:center;'>"
-                    f"<h4 style='margin:0;color:var(--text-heading);'>{w['category_icon']} {w['category_title']} · {w['name']}</h4>"
-                    f"{_confidence}</div>"
-                    f"<div style='color:var(--text-muted);font-size:0.85rem;margin-top:6px;'>📅 {w['label']}</div>"
-                    f"<div style='color:var(--accent);font-weight:600;font-size:0.9rem;margin-top:4px;'>"
-                    f"💸 Expected discount: {w['discount_range']}</div>"
-                    f"<div style='color:var(--text);font-size:0.85rem;margin-top:8px;line-height:1.5;'>{w['rationale']}</div>"
+                    f"<div style='display:flex;justify-content:space-between;align-items:flex-start;'>"
+                    f"<div><h4 style='margin:0;color:var(--text-heading);font-size:1.05rem;'>"
+                    f"{w['category_icon']} {w['category_title']} · {w['name']}</h4>"
+                    f"<div style='color:var(--text-muted);font-size:0.82rem;margin-top:4px;'>"
+                    f"📅 {w['label']} · ⏳ {days_left} days left</div></div>"
+                    f"<div style='text-align:right;'>{_conf_pill(w['confidence'])}<br>"
+                    f"<span style='color:var(--accent);font-weight:600;font-size:0.86rem;margin-top:6px;display:inline-block;'>"
+                    f"💸 {w['discount_range']}</span></div></div>"
+                    f"<div style='color:var(--text);font-size:0.86rem;margin-top:8px;line-height:1.55;'>"
+                    f"{w['rationale']}</div>"
                     f"</div>",
                     unsafe_allow_html=True,
                 )
                 if w["sources"]:
-                    cite_html = " · ".join(
-                        f"<a href='{url}' target='_blank' style='color:var(--text-dim);font-size:0.72rem;'>{name}</a>"
-                        for name, url in w["sources"]
+                    src_html = " · ".join(
+                        f"<a href='{u}' target='_blank' style='color:var(--text-muted);font-size:0.72rem;'>{n}</a>"
+                        for n, u in w["sources"]
                     )
                     st.markdown(
                         f"<div style='margin:-4px 0 14px 18px;font-size:0.72rem;'>"
-                        f"<span style='color:var(--text-faint);'>Sources:</span> {cite_html}</div>",
+                        f"<span style='color:var(--text-faint);'>📚 Sources:</span> {src_html}</div>",
                         unsafe_allow_html=True,
                     )
 
-        # Upcoming timeline
-        st.markdown("### 📅 Upcoming Timeline")
-        if not windows:
-            st.info("No upcoming buying windows in the next year.")
+    # ──────────────────────────────────────────────────────────────────
+    #  TAB 2 — PLAN A PURCHASE (personalized)
+    # ──────────────────────────────────────────────────────────────────
+    with tab_plan:
+        st.markdown("### 🎯 What are you planning to buy?")
+        st.caption("Pick a category — we'll show you the best window, runner-ups, and let you save it to your watchlist.")
+
+        cat_keys, cat_titles = _category_pick()
+
+        # Big visual category picker — buttons in a grid instead of a tiny dropdown
+        cols = st.columns(4)
+        for i, k in enumerate(cat_keys):
+            cat = buy_calendar.get_category(k)
+            with cols[i % 4]:
+                is_selected = st.session_state.get("buytime_picked_cat") == k
+                btn_label = f"{cat['icon']}\n{cat['title']}"
+                if st.button(
+                    btn_label,
+                    key=f"buytime_pick_{k}",
+                    use_container_width=True,
+                    type="primary" if is_selected else "secondary",
+                ):
+                    st.session_state["buytime_picked_cat"] = k
+                    st.rerun()
+
+        picked = st.session_state.get("buytime_picked_cat")
+        if not picked:
+            st.markdown(
+                "<div style='text-align:center;color:var(--text-faint);padding:24px 0;font-size:0.9rem;'>"
+                "👆 Pick a category above to see your buying plan.</div>",
+                unsafe_allow_html=True,
+            )
         else:
-            future = [w for w in windows if not w["is_active"]]
-            for w in future[:15]:
-                in_days = w["days_until"]
-                if in_days <= 7:
-                    color = "var(--warn)"
-                    badge = f"in {in_days}d"
-                elif in_days <= 30:
-                    color = "var(--info)"
-                    badge = f"in {in_days}d"
-                else:
-                    color = "var(--text-dim)"
-                    badge = w["start"].strftime("%b %d, %Y")
-                st.markdown(
-                    f"<div style='background:var(--bg-surface);border:1px solid var(--border-2);"
-                    f"border-left:3px solid {color};border-radius:10px;padding:10px 14px;margin-bottom:6px;'>"
-                    f"<div style='display:flex;justify-content:space-between;align-items:center;'>"
-                    f"<span><b>{w['category_icon']} {w['category_title']}</b> · {w['name']}</span>"
-                    f"<span style='color:{color};font-weight:600;font-size:0.82rem;'>{badge}</span></div>"
-                    f"<div style='color:var(--text-muted);font-size:0.78rem;margin-top:4px;'>"
-                    f"💸 {w['discount_range']} · {w['label']} · {_conf_pill(w['confidence'])}</div>"
-                    f"</div>",
-                    unsafe_allow_html=True,
-                )
+            cat = buy_calendar.get_category(picked)
+            st.markdown(f"## {cat['icon']} {cat['title']}")
+            if cat.get("subtitle"):
+                st.markdown(f"<p style='color:var(--text-muted);margin:-8px 0 12px;font-size:0.88rem;'>"
+                            f"{cat['subtitle']}</p>", unsafe_allow_html=True)
 
-
-    # ──────────────────────────────────────────────────────────────────
-    #  TAB 2 — BROWSE BY CATEGORY
-    # ──────────────────────────────────────────────────────────────────
-    with tab_categories:
-        cat_keys = buy_calendar.all_categories()
-        cat_titles = {k: f"{buy_calendar.get_category(k)['icon']} {buy_calendar.get_category(k)['title']}"
-                      for k in cat_keys}
-
-        selected_cat = st.selectbox(
-            "Pick a category",
-            options=cat_keys,
-            format_func=lambda k: cat_titles[k],
-            key="buytime_cat_select",
-        )
-
-        cat = buy_calendar.get_category(selected_cat)
-        if cat:
-            st.markdown(f"### {cat['icon']} {cat['title']}")
-
-            # Honest note if present
+            # Honest reality-check note if present
             if cat.get("honest_note"):
                 st.markdown(
                     f"<div style='background:var(--fill-warn);border-left:3px solid var(--warn);"
-                    f"border-radius:0 10px 10px 0;padding:10px 14px;margin:10px 0;font-size:0.85rem;'>"
-                    f"⚠️ <b>Reality check:</b> {cat['honest_note']}"
-                    f"</div>",
+                    f"border-radius:0 10px 10px 0;padding:12px 16px;margin:8px 0 16px;font-size:0.88rem;'>"
+                    f"⚠️ <b>Reality check:</b> {cat['honest_note']}</div>",
                     unsafe_allow_html=True,
                 )
 
-            today = datetime.date.today()
-            for w in cat["windows"]:
-                # Compute upcoming occurrences in this and next year
-                results = []
-                for offset in (0, 1):
-                    try:
-                        r = w["when"](today.year + offset)
-                    except Exception:
-                        continue
-                    if r and r[1] >= today:
-                        results.append(r)
-                if not results:
-                    continue
-                start, end, label = results[0]
-                is_active = start <= today <= end
-                _conf_html = _conf_pill(w.get("confidence", "MEDIUM"))
+            # Compute upcoming windows for this category, sorted by start
+            upcoming_for_cat = [w for w in all_windows if w["category_key"] == picked]
+            if not upcoming_for_cat:
+                st.info("No upcoming windows known for this category in the next year.")
+            else:
+                # ── Best recommendation: highest-confidence within the next 6 months ──
+                horizon_6mo = today + datetime.timedelta(days=180)
+                six_month = [w for w in upcoming_for_cat if w["start"] <= horizon_6mo]
+                if six_month:
+                    # Prioritize: HIGH-confidence active > HIGH-confidence soon > MED-confidence soon
+                    def _rank(w):
+                        conf_score = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}.get(w["confidence"], 3)
+                        active_bonus = -1 if w["is_active"] else 0
+                        return (conf_score + active_bonus, w["start"])
+                    best = sorted(six_month, key=_rank)[0]
 
-                border_color = "var(--accent)" if is_active else "var(--border-2)"
-                border_left  = "var(--accent)" if is_active else "var(--info)"
+                    is_active = best["is_active"]
+                    icon = "🔥" if is_active else "🎯"
+                    headline = "Buy now — active window" if is_active else "Best window coming up"
 
-                st.markdown(
-                    f"<div style='background:var(--bg-surface);border:1px solid {border_color};"
-                    f"border-left:4px solid {border_left};border-radius:12px;padding:14px 18px;margin-bottom:12px;'>"
-                    f"<div style='display:flex;justify-content:space-between;align-items:center;'>"
-                    f"<h4 style='margin:0;color:var(--text-heading);'>"
-                    f"{'🔥 ' if is_active else ''}{w['name']}</h4>"
-                    f"{_conf_html}</div>"
-                    f"<div style='color:var(--text-muted);font-size:0.82rem;margin-top:6px;'>"
-                    f"📅 {label}</div>"
-                    f"<div style='color:var(--accent);font-weight:600;font-size:0.88rem;margin-top:4px;'>"
-                    f"💸 {w.get('discount_range','—')}</div>"
-                    f"<div style='color:var(--text);font-size:0.86rem;margin-top:8px;line-height:1.55;'>"
-                    f"{w.get('rationale','')}</div>"
-                    f"</div>",
-                    unsafe_allow_html=True,
-                )
-
-                # Sources
-                sources = w.get("sources", [])
-                if sources:
-                    cite_html = " · ".join(
-                        f"<a href='{url}' target='_blank' style='color:var(--text-muted);'>{name}</a>"
-                        for name, url in sources
-                    )
                     st.markdown(
-                        f"<div style='margin:-6px 0 16px 18px;font-size:0.75rem;'>"
-                        f"<span style='color:var(--text-faint);'>📚 Sources:</span> {cite_html}</div>",
+                        f"""<div style='background:linear-gradient(135deg,
+                            {'rgba(34,197,94,0.12)' if is_active else 'rgba(59,130,246,0.10)'} 0%,
+                            transparent 100%);
+                            border:1px solid {'var(--accent)' if is_active else 'var(--info)'};
+                            border-left:4px solid {'var(--accent)' if is_active else 'var(--info)'};
+                            border-radius:14px;padding:18px 22px;margin-bottom:16px;'>
+                            <div style='font-size:0.78rem;color:{'var(--accent)' if is_active else 'var(--info)'};
+                                font-weight:700;letter-spacing:0.08em;text-transform:uppercase;margin-bottom:4px;'>
+                                {icon} {headline}
+                            </div>
+                            <h3 style='margin:0;color:var(--text-heading);font-size:1.2rem;'>
+                                {best['name']}
+                            </h3>
+                            <div style='display:flex;gap:16px;flex-wrap:wrap;margin:8px 0;font-size:0.86rem;'>
+                                <span style='color:var(--accent);font-weight:600;'>💸 {best['discount_range']}</span>
+                                <span style='color:var(--text-muted);'>📅 {best['label']}</span>
+                                <span style='color:var(--warn);font-weight:600;'>
+                                    {('⏳ ' + str((best['end']-today).days) + ' days left') if is_active
+                                     else ('🗓️ Starts in ' + str(best['days_until']) + ' days')}
+                                </span>
+                                <span>{_conf_pill(best['confidence'])}</span>
+                            </div>
+                            <div style='color:var(--text);font-size:0.88rem;line-height:1.6;margin-top:6px;'>
+                                {best['rationale']}
+                            </div>
+                        </div>""",
                         unsafe_allow_html=True,
                     )
 
+                    # Sources for the best window
+                    if best["sources"]:
+                        src_html = " · ".join(
+                            f"<a href='{u}' target='_blank' style='color:var(--text-muted);'>{n}</a>"
+                            for n, u in best["sources"]
+                        )
+                        st.markdown(
+                            f"<div style='margin:-12px 0 14px 4px;font-size:0.75rem;'>"
+                            f"<span style='color:var(--text-faint);'>📚 Sources:</span> {src_html}</div>",
+                            unsafe_allow_html=True,
+                        )
+
+                    # ── Add to watchlist button ──
+                    bc1, bc2 = st.columns([1, 4])
+                    with bc1:
+                        if st.button("⭐ Add to watchlist", key=f"buytime_watch_{picked}",
+                                     use_container_width=True, type="primary"):
+                            wl = data["buytime"].setdefault("watchlist", [])
+                            # Avoid duplicates
+                            existing = next((x for x in wl if x["category_key"] == picked
+                                             and x["window_name"] == best["name"]), None)
+                            if existing:
+                                st.warning("Already in your watchlist.")
+                            else:
+                                wl.append({
+                                    "id":           f"wl_{int(time.time() * 1000)}",
+                                    "category_key": picked,
+                                    "category_title": cat["title"],
+                                    "category_icon":  cat["icon"],
+                                    "window_name":  best["name"],
+                                    "added_on":     today.isoformat(),
+                                    "notes":        "",
+                                })
+                                save_data(data)
+                                st.success(f"✅ Added {cat['title']} to your watchlist!")
+                                st.rerun()
+
+                # ── Other windows for this category (timeline) ──
+                runner_ups = [w for w in upcoming_for_cat
+                              if not (six_month and w["start"] == best["start"]
+                                      and w["name"] == best["name"])][:6]
+                if runner_ups:
+                    st.markdown("#### 🗓️ Other windows for this category")
+                    for w in runner_ups:
+                        days_text = (
+                            f"⏳ {(w['end']-today).days}d left" if w["is_active"]
+                            else f"in {w['days_until']}d"
+                        )
+                        color = "var(--accent)" if w["is_active"] else "var(--text-dim)"
+                        st.markdown(
+                            f"<div style='background:var(--bg-surface);border:1px solid var(--border-2);"
+                            f"border-radius:10px;padding:10px 14px;margin-bottom:6px;"
+                            f"display:flex;justify-content:space-between;align-items:center;'>"
+                            f"<div><b>{w['name']}</b><br>"
+                            f"<span style='font-size:0.78rem;color:var(--text-muted);'>"
+                            f"📅 {w['label']} · 💸 {w['discount_range']}</span></div>"
+                            f"<div style='text-align:right;'>{_conf_pill(w['confidence'])}<br>"
+                            f"<span style='color:{color};font-weight:600;font-size:0.78rem;'>"
+                            f"{days_text}</span></div></div>",
+                            unsafe_allow_html=True,
+                        )
 
     # ──────────────────────────────────────────────────────────────────
-    #  TAB 3 — PRICE TRENDS (mined from scraped data)
+    #  TAB 3 — WATCHLIST
+    # ──────────────────────────────────────────────────────────────────
+    with tab_watchlist:
+        st.markdown("### ⭐ Your Watchlist")
+        st.caption("Things you're planning to buy. We'll show you the next window for each.")
+
+        wl = data["buytime"].setdefault("watchlist", [])
+        if not wl:
+            st.markdown(
+                "<div style='background:var(--bg-surface);border:1px dashed var(--border-2);"
+                "border-radius:12px;padding:32px 18px;text-align:center;color:var(--text-muted);'>"
+                "<div style='font-size:2.4rem;margin-bottom:8px;'>📭</div>"
+                "<div style='font-size:0.95rem;'>Your watchlist is empty.</div>"
+                "<div style='font-size:0.82rem;margin-top:6px;'>"
+                "Pick a category in the <b>Plan a purchase</b> tab and tap ⭐ to save it here.</div>"
+                "</div>",
+                unsafe_allow_html=True,
+            )
+        else:
+            for item in wl[:]:
+                # Re-resolve the next window for this watchlist entry
+                cat_windows = [w for w in all_windows if w["category_key"] == item["category_key"]]
+                # Try to find the same window we saved; if not found (date passed), grab the next one
+                matching = [w for w in cat_windows if w["name"] == item["window_name"]]
+                next_w = matching[0] if matching else (cat_windows[0] if cat_windows else None)
+
+                if next_w:
+                    is_active = next_w["is_active"]
+                    if is_active:
+                        accent = "var(--accent)"
+                        status = f"🔥 Active now — {(next_w['end']-today).days} days left"
+                    elif next_w["days_until"] <= 30:
+                        accent = "var(--warn)"
+                        status = f"⏰ Starts in {next_w['days_until']} days"
+                    else:
+                        accent = "var(--info)"
+                        status = f"🗓️ {next_w['start'].strftime('%b %d, %Y')}"
+
+                    cols_w = st.columns([5, 2, 1])
+                    with cols_w[0]:
+                        st.markdown(
+                            f"<div style='background:var(--bg-surface);border:1px solid var(--border-2);"
+                            f"border-left:4px solid {accent};border-radius:10px;padding:12px 16px;'>"
+                            f"<b style='font-size:1rem;'>{item['category_icon']} {item['category_title']}</b><br>"
+                            f"<span style='color:var(--text-muted);font-size:0.82rem;'>"
+                            f"{next_w['name']} · 💸 {next_w['discount_range']}</span>"
+                            f"</div>",
+                            unsafe_allow_html=True,
+                        )
+                    with cols_w[1]:
+                        st.markdown(
+                            f"<div style='padding:14px 0;text-align:center;'>"
+                            f"<span style='color:{accent};font-weight:600;font-size:0.85rem;'>{status}</span></div>",
+                            unsafe_allow_html=True,
+                        )
+                    with cols_w[2]:
+                        if st.button("🗑️", key=f"buytime_wl_del_{item['id']}", help="Remove from watchlist"):
+                            data["buytime"]["watchlist"] = [x for x in wl if x["id"] != item["id"]]
+                            save_data(data)
+                            st.rerun()
+                else:
+                    cols_w = st.columns([6, 1])
+                    cols_w[0].markdown(
+                        f"<div style='background:var(--bg-surface);border:1px solid var(--border-2);"
+                        f"border-radius:10px;padding:12px 16px;'>"
+                        f"<b>{item['category_icon']} {item['category_title']}</b> "
+                        f"<span style='color:var(--text-faint);font-size:0.78rem;'>(no upcoming windows)</span></div>",
+                        unsafe_allow_html=True,
+                    )
+                    with cols_w[1]:
+                        if st.button("🗑️", key=f"buytime_wl_del_{item['id']}"):
+                            data["buytime"]["watchlist"] = [x for x in wl if x["id"] != item["id"]]
+                            save_data(data)
+                            st.rerun()
+
+    # ──────────────────────────────────────────────────────────────────
+    #  TAB 4 — PRICE TRENDS (data analysis on scraped history)
     # ──────────────────────────────────────────────────────────────────
     with tab_trends:
-        st.markdown("### 📊 Analysis from Thrivo's Scraped Data")
+        st.markdown("### 📊 Trends from Thrivo's Scraped Data")
         st.caption(
-            "These charts run on the price history collected by Thrivo's daily scraper. "
-            "Recommendations are statistical: based on YOUR data, not predictions."
+            "Statistical analysis of YOUR price history — gold, USD/EGP, BTC. "
+            "Recommendations are honest about what the data does and doesn't say."
         )
 
-        # Pull what we have
         try:
             assets_to_check = [
                 ("gold_k21", "🥇 Gold 21k (EGP/gram)"),
@@ -7387,57 +8946,53 @@ elif st.session_state['page'] == 'BuyTime':
                     continue
 
             if not histories:
-                st.info(
-                    "📡 The scraper hasn't collected enough data yet for trend analysis. "
-                    "It needs at least 14 days of history per asset. "
-                    "Trends will start appearing automatically as data accumulates daily. "
-                    "Trigger the scraper manually from your GitHub repo's Actions tab to seed faster."
+                st.markdown(
+                    "<div style='background:var(--bg-surface);border:1px dashed var(--border-2);"
+                    "border-radius:12px;padding:28px 18px;text-align:center;color:var(--text-muted);'>"
+                    "<div style='font-size:2.2rem;margin-bottom:8px;'>📡</div>"
+                    "<div style='font-size:0.95rem;'>No price history yet.</div>"
+                    "<div style='font-size:0.82rem;margin-top:6px;'>"
+                    "The daily scraper needs ~14 days to populate data. Trigger it manually from "
+                    "your GitHub Actions tab to seed faster.</div></div>",
+                    unsafe_allow_html=True,
                 )
             else:
                 for asset_key, (label, history) in histories.items():
                     analysis = buy_calendar.analyze_price_history(history, asset_name=label)
 
-                    # Verdict header
                     verdict = analysis["verdict"]
                     if verdict == "BUY_NOW":
-                        verdict_color = "var(--accent)"
-                        verdict_emoji = "✅"
+                        verdict_color = "var(--accent)";  verdict_emoji = "✅"
                     elif verdict == "WAIT":
-                        verdict_color = "var(--danger)"
-                        verdict_emoji = "⏸️"
+                        verdict_color = "var(--danger)";  verdict_emoji = "⏸️"
                     elif verdict == "NEUTRAL":
-                        verdict_color = "var(--info)"
-                        verdict_emoji = "↔️"
+                        verdict_color = "var(--info)";    verdict_emoji = "↔️"
                     else:
-                        verdict_color = "var(--text-dim)"
-                        verdict_emoji = "❓"
+                        verdict_color = "var(--text-dim)"; verdict_emoji = "❓"
 
                     with st.container():
                         st.markdown(
                             f"<div style='background:var(--bg-surface);border:1px solid var(--border-2);"
                             f"border-left:4px solid {verdict_color};border-radius:12px;padding:16px 20px;margin-bottom:12px;'>"
                             f"<div style='display:flex;justify-content:space-between;align-items:flex-start;'>"
-                            f"<h4 style='margin:0;color:var(--text-heading);'>{label}</h4>"
-                            f"<span style='color:{verdict_color};font-weight:700;font-size:1.1rem;'>"
+                            f"<h4 style='margin:0;color:var(--text-heading);font-size:1.05rem;'>{label}</h4>"
+                            f"<span style='color:{verdict_color};font-weight:700;font-size:1.05rem;'>"
                             f"{verdict_emoji} {verdict.replace('_', ' ')}</span></div>"
                             f"<div style='color:var(--text);font-size:0.88rem;margin-top:8px;line-height:1.55;'>"
                             f"{analysis['explanation']}</div>"
                             f"<div style='color:var(--text-dim);font-size:0.75rem;margin-top:6px;'>"
-                            f"Based on {analysis['n_days']} days of data · "
-                            f"Confidence: {_conf_pill(analysis['confidence'])}</div>"
+                            f"📈 {analysis['n_days']} days of data · Confidence: {_conf_pill(analysis['confidence'])}</div>"
                             f"</div>",
                             unsafe_allow_html=True,
                         )
 
-                        # Stats row
                         if analysis.get("avg"):
                             sc1, sc2, sc3, sc4 = st.columns(4)
-                            sc1.metric("Current",  f"{analysis['current']:,.2f}")
-                            sc2.metric("Average",  f"{analysis['avg']:,.2f}")
-                            sc3.metric("Min",      f"{analysis['min']:,.2f}")
-                            sc4.metric("Max",      f"{analysis['max']:,.2f}")
+                            sc1.metric("Current", f"{analysis['current']:,.2f}")
+                            sc2.metric("Average", f"{analysis['avg']:,.2f}")
+                            sc3.metric("Min",     f"{analysis['min']:,.2f}")
+                            sc4.metric("Max",     f"{analysis['max']:,.2f}")
 
-                        # Plot
                         if len(history) >= 14:
                             df_h = pd.DataFrame([{"date": h["date"], "value": h["value"]} for h in history])
                             df_h["date"] = pd.to_datetime(df_h["date"])
@@ -7448,14 +9003,10 @@ elif st.session_state['page'] == 'BuyTime':
                                 line=dict(color="#22c55e", width=2),
                                 fill="tozeroy",
                                 fillcolor="rgba(34,197,94,0.06)",
-                                name=label,
                             ))
-                            # Average line
                             if analysis.get("avg"):
                                 fig.add_hline(
-                                    y=analysis["avg"],
-                                    line_dash="dash",
-                                    line_color="#94a3b8",
+                                    y=analysis["avg"], line_dash="dash", line_color="#94a3b8",
                                     annotation_text=f"avg {analysis['avg']:,.2f}",
                                     annotation_position="top right",
                                     annotation_font_color="#94a3b8",
@@ -7465,26 +9016,117 @@ elif st.session_state['page'] == 'BuyTime':
                                 plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
                                 xaxis=dict(color="#94a3b8", showgrid=False),
                                 yaxis=dict(color="#94a3b8", showgrid=True, gridcolor="#1e293b"),
-                                margin=dict(l=0, r=0, t=10, b=0),
-                                showlegend=False,
+                                margin=dict(l=0, r=0, t=10, b=0), showlegend=False,
                             )
                             st.plotly_chart(fig, use_container_width=True)
 
-                        # Best/worst months (only if enough data)
                         if analysis.get("best_months"):
                             month_names = ["", "Jan", "Feb", "Mar", "Apr", "May", "Jun",
                                            "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
-                            best_str  = " · ".join(f"{month_names[m]} ({v:,.2f})" for m, v in analysis["best_months"])
-                            worst_str = " · ".join(f"{month_names[m]} ({v:,.2f})" for m, v in analysis["worst_months"])
+                            best_str  = " · ".join(f"{month_names[m]} ({v:,.2f})"
+                                                   for m, v in analysis["best_months"])
+                            worst_str = " · ".join(f"{month_names[m]} ({v:,.2f})"
+                                                   for m, v in analysis["worst_months"])
                             st.markdown(
                                 f"<div style='font-size:0.85rem;color:var(--text-muted);margin-top:6px;'>"
                                 f"📉 <b>Cheapest months historically:</b> {best_str}<br>"
-                                f"📈 <b>Priciest months historically:</b> {worst_str}"
-                                f"</div>",
+                                f"📈 <b>Priciest months historically:</b> {worst_str}</div>",
                                 unsafe_allow_html=True,
                             )
-
                         st.markdown("<br>", unsafe_allow_html=True)
         except Exception as e:
             st.error(f"Could not load price history: {e}")
             st.caption("This is normal on a fresh deploy. Wait for the scraper to populate data.")
+
+    # ──────────────────────────────────────────────────────────────────
+    #  TAB 5 — SAVINGS LOG
+    # ──────────────────────────────────────────────────────────────────
+    with tab_savings:
+        st.markdown("### 💰 Savings Log")
+        st.caption("Track money saved by buying in-window. Builds visible value of timing your purchases.")
+
+        savings_log = data["buytime"].setdefault("savings_log", [])
+
+        # Form to add a new entry
+        with st.expander("➕ Log a purchase you timed well", expanded=not savings_log):
+            with st.form("buytime_savings_form", clear_on_submit=True):
+                cat_keys, cat_titles = _category_pick()
+                c1, c2 = st.columns(2)
+                with c1:
+                    s_cat = st.selectbox("Category", options=cat_keys,
+                                         format_func=lambda k: cat_titles[k])
+                    s_item = st.text_input("What did you buy?", placeholder="e.g. iPhone 15 Pro 128GB")
+                    s_paid = st.number_input("Price you paid (EGP)", min_value=0.0, step=100.0, value=0.0)
+                with c2:
+                    s_full = st.number_input("Full retail price (EGP)", min_value=0.0, step=100.0, value=0.0,
+                                             help="The price before the discount window")
+                    s_when = st.date_input("Purchase date", value=today)
+                    s_window = st.text_input("Which window?", placeholder="e.g. White Friday 2026, Pre-Eid")
+
+                if st.form_submit_button("💾 Log savings", type="primary", use_container_width=True):
+                    if s_item and s_paid > 0 and s_full > s_paid:
+                        savings_log.append({
+                            "id":       f"sv_{int(time.time() * 1000)}",
+                            "category_key":  s_cat,
+                            "category_icon": buy_calendar.get_category(s_cat)["icon"],
+                            "category_title": buy_calendar.get_category(s_cat)["title"],
+                            "item":     s_item,
+                            "paid":     float(s_paid),
+                            "full":     float(s_full),
+                            "saved":    float(s_full - s_paid),
+                            "saved_pct": round((s_full - s_paid) / s_full * 100, 1),
+                            "date":     s_when.isoformat(),
+                            "window":   s_window,
+                        })
+                        save_data(data)
+                        st.success(f"✅ Logged {s_full - s_paid:,.0f} EGP saved!")
+                        st.rerun()
+                    else:
+                        st.error("Please fill in all fields. Full price must be higher than paid price.")
+
+        if not savings_log:
+            st.markdown(
+                "<div style='background:var(--bg-surface);border:1px dashed var(--border-2);"
+                "border-radius:12px;padding:24px 18px;text-align:center;color:var(--text-muted);'>"
+                "<div style='font-size:2.2rem;margin-bottom:8px;'>🪙</div>"
+                "<div style='font-size:0.92rem;'>No savings logged yet.</div>"
+                "<div style='font-size:0.82rem;margin-top:6px;'>"
+                "Log your first well-timed purchase above to see how much you've saved.</div></div>",
+                unsafe_allow_html=True,
+            )
+        else:
+            # Top stats
+            total_saved = sum(s["saved"] for s in savings_log)
+            avg_pct     = sum(s["saved_pct"] for s in savings_log) / len(savings_log)
+            sm1, sm2, sm3 = st.columns(3)
+            sm1.metric("Total saved",      f"{total_saved:,.0f} EGP")
+            sm2.metric("Avg discount",     f"{avg_pct:.1f}%")
+            sm3.metric("Purchases logged", len(savings_log))
+
+            st.markdown("---")
+            for s in sorted(savings_log, key=lambda x: x["date"], reverse=True):
+                cols_s = st.columns([5, 2, 1])
+                with cols_s[0]:
+                    st.markdown(
+                        f"<div style='background:var(--bg-surface);border:1px solid var(--border-2);"
+                        f"border-left:3px solid var(--accent);border-radius:10px;padding:11px 16px;'>"
+                        f"<b>{s['category_icon']} {s['item']}</b><br>"
+                        f"<span style='font-size:0.78rem;color:var(--text-muted);'>"
+                        f"{s['date']} · {s.get('window', '—')}</span></div>",
+                        unsafe_allow_html=True,
+                    )
+                with cols_s[1]:
+                    st.markdown(
+                        f"<div style='padding:8px 0;text-align:right;'>"
+                        f"<span style='color:var(--accent);font-weight:700;font-family:JetBrains Mono,monospace;'>"
+                        f"+{s['saved']:,.0f} EGP</span><br>"
+                        f"<span style='color:var(--text-dim);font-size:0.78rem;'>"
+                        f"-{s['saved_pct']:.1f}% off {s['full']:,.0f}</span></div>",
+                        unsafe_allow_html=True,
+                    )
+                with cols_s[2]:
+                    if st.button("🗑️", key=f"buytime_sv_del_{s['id']}"):
+                        data["buytime"]["savings_log"] = [x for x in savings_log if x["id"] != s["id"]]
+                        save_data(data)
+                        st.rerun()
+

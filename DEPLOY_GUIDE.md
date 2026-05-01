@@ -52,7 +52,50 @@ If `deploy.sh` doesn't work for you (Windows, no `gh`, etc), use the manual step
 
 ---
 
-## ✅ Step 1 — Get a free Postgres database
+## ✅ Step 1 — Database setup (pick one)
+
+Thrivo v10.4 supports two backends. **You only need to pick ONE.**
+
+### Option A (recommended for solo use): SQLite + GitHub backup
+
+Zero hosted services. The database is a single `thrivo.db` file. To survive Streamlit Cloud's filesystem wipes, the file is auto-backed-up to a separate branch on your own GitHub repo.
+
+**What you need:**
+1. A **GitHub Personal Access Token** with `repo` scope:
+   - Go to https://github.com/settings/tokens → **Generate new token (classic)**
+   - Name: `thrivo-backup` · Expiration: 1 year (or no expiration)
+   - Scopes: check **`repo`** (full control of private repositories)
+   - Click **Generate** and **copy the token** — you won't see it again
+2. Note your repo path in `owner/name` form (e.g. `egahmedsamir/thrivo-app`)
+
+These will go into Streamlit secrets in Step 3 below as:
+```toml
+THRIVO_BACKUP_PAT  = "ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+THRIVO_BACKUP_REPO = "egahmedsamir/thrivo-app"
+```
+
+The app auto-creates a branch called `thrivo-data-backup` and commits `thrivo.db` there every time data changes (throttled to once per 60s). On startup, if the local file is missing, it pulls the backup. **DO NOT skip the PAT** — without it, you WILL lose data.
+
+### Option B (recommended for multi-user / production): Hosted Postgres
+
+This is what original v10 used. Free tier on Supabase (500MB, never expires) or Neon (3GB).
+
+1. Go to **https://supabase.com** → sign up → **New project**:
+   - Name: `thrivo` · Region: Frankfurt · Plan: Free
+   - Save the DB password
+2. Click **Connect** → **Connection string** → **URI** → **Direct connection**
+3. Replace `[YOUR-PASSWORD]` with your saved password
+4. **Save this string — this is your `DATABASE_URL`.**
+
+Setting `DATABASE_URL` makes Thrivo skip SQLite entirely and use Postgres.
+
+### What if I set both?
+
+Postgres wins. The order is: Postgres → SQLite → JSON files. If you set `DATABASE_URL`, the SQLite/backup logic is bypassed.
+
+---
+
+## ✅ Step 1.5 (legacy section, kept for reference) — Get a free Postgres database
 
 This is the most important step. Without this, your data is wiped on every restart.
 
@@ -109,8 +152,16 @@ git push -u origin main
    - Python version: `3.11`
    - Add **Secrets** (paste this, replacing values):
      ```toml
-     DATABASE_URL = "postgresql://postgres:YOUR_PASSWORD@db.xxx.supabase.co:5432/postgres"
-     THRIVO_ADMIN_EMAIL = "your@email.com"
+     # ── PICK ONE backend ──
+     # Option A (SQLite + GitHub backup) — leave DATABASE_URL unset
+     THRIVO_BACKUP_PAT  = "ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+     THRIVO_BACKUP_REPO = "yourusername/thrivo-app"
+
+     # Option B (Postgres) — uncomment if you set up Supabase
+     # DATABASE_URL = "postgresql://postgres:PASSWORD@db.xxx.supabase.co:5432/postgres"
+
+     # ── Other config ──
+     THRIVO_ADMIN_EMAIL   = "your@email.com"
      THRIVO_PAYMENT_PHONE = "01XXXXXXXXX"
 
      # Optional — only if you want admin notification emails
@@ -236,9 +287,50 @@ After deploy, run through this checklist:
 
 ---
 
+## 🛒 Smart Buying Calendar (Pro+ feature)
+
+Major update in **v10.1**: redesigned UX (clearer mental model) + new **Personal Care & Beauty** category with 9 Egypt-specific windows.
+
+**v10.1 UX changes — what users now see:**
+
+The page opens with a **hero card** that answers "should I buy now?" in one glance — pulls the highest-confidence active window or the next one starting in 30 days, no scrolling needed. Below that, **5 redesigned tabs**:
+
+1. **📅 Calendar** — visual 12-month Gantt-style chart. Each shopping window is painted as a colored band on a real timeline. "Today" is marked with a green vertical line. Hover any band to see what's discounted.
+2. **🎯 Plan a purchase** — pick a category from a 4×N visual button grid (not a tiny dropdown). The app then computes your personalized "Best window" recommendation, runner-up windows, and a one-click "Add to watchlist" button.
+3. **⭐ My watchlist** — your saved planned purchases with live countdowns. Each entry shows "Active now" / "Starts in N days" / future date and the discount range expected.
+4. **📊 Price trends** — same as before; analyses YOUR scraped gold/USD/BTC history with BUY_NOW/WAIT/NEUTRAL verdicts.
+5. **💰 Savings log** — new tracker. Log each purchase you timed well (e.g. "iPhone 15 — paid 38000, full was 47700, during White Friday 2026") → app sums total saved, average %, count. Builds visible long-term value of timing purchases. Persisted via the `buytime.savings_log` user data field.
+
+**Inline help expander** explains confidence pills and the data approach right at the top of the page — so users don't have to dig through docs to know what to trust.
+
+**New category — Personal Care & Beauty** (`personal_care_beauty` key in `buy_calendar.py`):
+
+- **Pre-Eid al-Fitr** — Egypt's #1 beauty window (HIGH confidence). 30–80% off premium, 2-for-1 sets common. Sources: Ramfa Beauty Egypt, Noon, Qyubic.
+- **Mother's Day (Mar 21 — Egypt-specific)** — HIGH confidence, 20–50% off. Note: Egypt's Mother's Day is fixed March 21, *different from US/UK*.
+- **Ramadan beauty (early Ramadan)** — Sephora Ramadan Beauty Nights sets, halal beauty kits.
+- **Eid al-Adha** — perfume & oud focus, smaller than Eid al-Fitr.
+- **Yellow/White Friday** — best skincare & anti-aging window (HIGH).
+- **Valentine's Day (Feb 14)** — perfume & gift sets (MEDIUM, smaller window).
+- **11.11 Singles' Day** — K-beauty & Chinese brands.
+- **Back-to-school** — compact/travel essentials (LOW confidence, narrow appeal).
+- **Year-round oral care 2-pack deals** — Noon's permanent rotating Signal/Closeup 15% twin-pack promo.
+
+Honest reality-check baked in: "Beauty in Egypt is unusually skewed toward Eid (60–80% off) vs other windows (20–40%). Time premium fragrances/skincare to pre-Eid; drugstore items follow Yellow/White Friday more than Eid."
+
+**Plan gating unchanged:** Pro and Business plans only.
+
+**Data schema migration:** new key `buytime: {watchlist: [], savings_log: []}` auto-added to user data. No DB migration needed — `_get_default_user_data()` handles forward-compat for existing users on load.
+
+**To customize:** edit `buy_calendar.py` → `CATEGORIES["personal_care_beauty"]["windows"]`. Each window needs `name`, `when` (callable: year → `(start, end, label)`), `discount_range`, `confidence`, `rationale`, `sources` (list of `(name, url)` tuples).
+
+**Why curated, not AI-generated:** I considered making this feature pull recommendations from an LLM. I rejected it. LLMs invent plausible-sounding "buy in October" claims that can cost users real money when wrong. The curated approach means every recommendation has a verifiable source link, and we honestly say "no clear pattern" instead of fabricating confidence.
+
+---
+
 ## 🚀 Upgrades for later
 
 - **Custom domain** — buy `thrivo.app` (~$15/yr), add it in Streamlit Cloud → Settings → Custom domain
 - **iOS push notifications** — needs a push service + iOS 16.4+ users; ask when ready
 - **App Store distribution** — Capacitor wrapper around the same web app
 - **Stripe billing** — paid plans currently use manual approval; add Stripe Checkout when you have paying customers
+- **Expand the buying calendar** — add categories users request (cosmetics, books, kids' toys, etc) following the pattern in `buy_calendar.py`
