@@ -1,18 +1,18 @@
 {
-  "_run_at": "2026-05-12T06:30:17.350487",
-  "_date": "2026-05-12",
+  "_run_at": "2026-05-13T06:40:57.961461",
+  "_date": "2026-05-13",
   "usd_egp": {
     "asset": "usd_egp",
-    "rate": 52.82,
+    "rate": 52.92,
     "prev_close": null,
     "change_pct": 0,
     "source": "investing.com"
   },
   "btc": {
     "asset": "btc",
-    "usd": 81210.0,
+    "usd": 81036.0,
     "egp": null,
-    "change_pct_24h": 0.31829492411150645,
+    "change_pct_24h": -0.03898037438126486,
     "source": "coingecko"
   }
 }
