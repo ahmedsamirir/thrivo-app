@@ -54,7 +54,7 @@ class AppConfig:
     NAME          = "Thrivo"
     TAGLINE       = "Grow with intention."
     ICON          = "🌱"
-    VERSION       = "v9.0"
+    VERSION       = "v11.0"
 
     # ── Storage ──
     DATA_FILE          = "thrivo_shared_data.json"   # legacy shared file (for migration)
@@ -420,7 +420,7 @@ ALL_TABS = [
     ("💳", "Credit Tracker",   "Credit"),
     ("🏋️", "Gym Tracker",      "Gym"),
     ("📈", "EGX Stocks",       "Stocks"),
-    ("🛒", "Smart Buying",     "BuyTime"),       # NEW v10 — Egyptian buying calendar (Pro+)
+    ("🛒", "Smart Buying",     "BuyTime"),       # NEW v11 — Egyptian buying calendar (Pro+)
     ("🎯", "Goal OS",          "GoalOS"),        # NEW — OKR-style goals
     ("✅", "Habit Tracker",    "Habits"),        # NEW — 21-day habit grid
     ("⏱️", "Focus Timer",      "Pomodoro"),      # NEW — pomodoro
@@ -560,52 +560,121 @@ def _get_user_tabs(username: str, users: dict) -> list:
 # ──────────────────────────────────────────────────────────────────────
 #  PUBLIC PRICES — visible to anyone, no login needed
 # ──────────────────────────────────────────────────────────────────────
-@st.cache_data(ttl=21600)  # 6 hours — refresh covers cron schedule + buffer
+@st.cache_data(ttl=1800)  # 30 min — short enough that a stuck cache recovers fast
 def _fetch_public_prices_cached() -> dict:
     """
-    Strategy:
-      1. Try Postgres (db.load_prices) — populated by cron job.
-      2. Fall back to public_prices.json — committed by GitHub Actions.
-      3. Last resort — run the scraper live (slow first call, but always works).
+    Resilient multi-source price fetch (v11 — fixes the partial-data bug).
+
+    Each asset (gold, usd_egp, btc, egx) is resolved INDEPENDENTLY. The old
+    logic returned the entire DB dict as soon as ANY data existed — so when
+    BTC succeeded but gold/usd/egx all failed, the cached dict would forever
+    show BTC + dashes for everything else.
+
+    Resolution order per asset:
+      1. Snapshot file (public_prices.json) — fast, cron-populated
+      2. DB (Postgres / SQLite / JSON backend) — alternate cron storage
+      3. Live scrape — if both above are missing or invalid for THIS asset
     """
-    out: dict = {}
+    import importlib, sys as _sys, os as _os
 
-    # Source 1: DB
-    try:
-        db_prices = db.load_prices()
-        if db_prices:
-            out.update(db_prices)
-            out["_source"] = f"database ({db.get_backend_kind()})"
-            return out
-    except Exception:
-        pass
-
-    # Source 2: JSON snapshot in repo (written by cron)
-    try:
-        if os.path.exists("public_prices.json"):
+    # ── Load whatever the snapshot file & DB have (independently) ──
+    snap_data: dict = {}
+    if os.path.exists("public_prices.json"):
+        try:
             with open("public_prices.json", "r", encoding="utf-8") as f:
-                snap = json.load(f)
-            out.update(snap)
-            out["_source"] = "snapshot file"
-            return out
-    except Exception:
-        pass
+                snap_data = json.load(f) or {}
+        except Exception:
+            snap_data = {}
 
-    # Source 3: Live scrape — only if both above failed (rare)
+    db_data: dict = {}
     try:
-        import importlib, sys as _sys, os as _os
-        scripts_dir = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "scripts")
-        if scripts_dir not in _sys.path:
-            _sys.path.insert(0, scripts_dir)
-        sp = importlib.import_module("scrape_prices")
-        out["gold"]    = sp.fetch_gold()
-        out["usd_egp"] = sp.fetch_usd_egp()
-        out["btc"]     = sp.fetch_btc()
-        out["egx"]     = sp.fetch_egx()
-        out["_source"] = "live scrape (cron unavailable)"
+        db_data = db.load_prices() or {}
     except Exception:
-        out["_source"] = "unavailable"
+        db_data = {}
 
+    # ── Try to import the scraper for live fallback ──
+    scripts_dir = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "scripts")
+    if scripts_dir not in _sys.path:
+        _sys.path.insert(0, scripts_dir)
+    try:
+        sp = importlib.import_module("scrape_prices")
+    except Exception:
+        sp = None
+
+    sources_used: list[str] = []
+
+    def _try_one(key: str, live_fn_name: str, validator):
+        """Snapshot → DB → live scrape. Returns whatever passes the validator."""
+        # 1. Snapshot file
+        v = snap_data.get(key)
+        if v and validator(v):
+            sources_used.append(f"{key}:snapshot")
+            return v
+        # 2. DB
+        v = db_data.get(key)
+        if v and validator(v):
+            sources_used.append(f"{key}:db")
+            return v
+        # 3. Live
+        if sp:
+            try:
+                live = getattr(sp, live_fn_name)()
+                if live and validator(live):
+                    sources_used.append(f"{key}:live")
+                    try:
+                        db.save_price(key, live)
+                    except Exception:
+                        pass
+                    return live
+            except Exception:
+                pass
+        return v  # whatever we had (may be None/invalid; UI shows "—")
+
+    _valid_gold = lambda v: isinstance(v, dict) and bool(v.get("values"))
+    _valid_usd  = lambda v: isinstance(v, dict) and bool(v.get("rate")) and 5 < float(v["rate"]) < 1000
+    _valid_btc  = lambda v: isinstance(v, dict) and bool(v.get("usd"))
+
+    out: dict = {}
+    out["gold"]    = _try_one("gold",    "fetch_gold",    _valid_gold)
+    out["usd_egp"] = _try_one("usd_egp", "fetch_usd_egp", _valid_usd)
+    out["btc"]     = _try_one("btc",     "fetch_btc",     _valid_btc)
+
+    # EGX is a list (not dict). Stored in DB as {"stocks": [...]}, in snapshot as a list directly.
+    egx = snap_data.get("egx")
+    if not (isinstance(egx, list) and len(egx) > 0):
+        db_egx = db_data.get("egx")
+        if isinstance(db_egx, dict):
+            db_egx = db_egx.get("stocks")
+        if isinstance(db_egx, list) and len(db_egx) > 0:
+            egx = db_egx
+            sources_used.append("egx:db")
+        elif sp:
+            try:
+                live = sp.fetch_egx()
+                if isinstance(live, list) and len(live) > 0:
+                    egx = live
+                    sources_used.append("egx:live")
+                    try:
+                        db.save_price("egx", {"stocks": live, "source": live[0].get("source", "mixed")})
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+    else:
+        sources_used.append("egx:snapshot")
+    out["egx"] = egx or []
+
+    # Bookkeeping for the "source" label on the UI
+    out["_run_at"] = snap_data.get("_run_at") or db_data.get("_run_at")
+    if any(":live" in s for s in sources_used):
+        out["_source"] = "snapshot + live scrape (mixed)"
+    elif snap_data:
+        out["_source"] = "snapshot file"
+    elif db_data:
+        out["_source"] = f"database ({db.get_backend_kind()})"
+    else:
+        out["_source"] = "live scrape"
+    out["_sources_detail"] = sources_used
     return out
 
 
@@ -978,84 +1047,143 @@ def render_admin_panel(users: dict):
     """Admin user management panel with approval queue."""
     st.title("⚙️ Admin Panel — Thrivo")
 
-    # ── DATABASE & BACKUP STATUS ──
-    backend_kind   = db.get_backend_kind()
-    init_err       = db.get_init_error()
-    backup_status  = db.get_backup_status()
+    # ── DATA BACKUP — Manual export / import (v11) ──
+    # Streamlit Cloud's filesystem is ephemeral: data gets wiped on redeploys,
+    # cold starts, and infrastructure reboots. This panel is YOUR insurance.
+    backup_status = db.get_backup_status()
+    files_info    = backup_status.get("files", [])
+    newest_ts     = backup_status.get("newest_change_ts", 0)
+    now_ts        = datetime.datetime.now().timestamp()
+    hours_since_change = ((now_ts - newest_ts) / 3600) if newest_ts else None
 
-    backend_color  = ("#22c55e" if backend_kind == "Postgres"
-                      else "#3b82f6" if backend_kind == "SQLite"
-                      else "#f59e0b")
+    # Risk indicator — color the box by how recent the last change was
+    if hours_since_change is None:
+        risk_color, risk_emoji = "#64748b", "📭"
+        risk_msg = "No data files yet."
+    elif hours_since_change < 1:
+        risk_color, risk_emoji = "#22c55e", "🟢"
+        risk_msg = f"Data changed {int(hours_since_change*60)} min ago. Consider backing up before any code push."
+    elif hours_since_change < 24:
+        risk_color, risk_emoji = "#22c55e", "🟢"
+        risk_msg = f"Data changed {hours_since_change:.1f}h ago. You should download a backup."
+    else:
+        risk_color, risk_emoji = "#f59e0b", "🟡"
+        risk_msg = f"Data changed {hours_since_change/24:.1f} days ago."
 
-    with st.expander(f"🗄️ Database & Backup ({backend_kind})", expanded=False):
-        col_a, col_b = st.columns(2)
-        with col_a:
-            if backend_kind == "Postgres":
-                _backend_caption = "Postgres URL is set — production mode."
-            elif backend_kind == "SQLite":
-                _backend_caption = "Single SQLite file (thrivo.db). Add DATABASE_URL env to switch to Postgres."
-            else:
-                _backend_caption = "Fallback JSON storage. SQLite & Postgres both unavailable."
+    with st.expander("🗄️  Data Storage & Backup  —  IMPORTANT", expanded=True):
+        st.markdown(
+            f"<div style='background:rgba(245,158,11,0.08);border-left:4px solid #f59e0b;"
+            f"border-radius:8px;padding:12px 16px;margin-bottom:14px;'>"
+            f"<b style='color:#fbbf24;'>⚠️  Streamlit Cloud's filesystem is ephemeral.</b><br>"
+            f"<span style='color:#cbd5e1;font-size:0.86rem;line-height:1.5;'>"
+            f"Your data lives in JSON files on the server. Those files get wiped whenever the app "
+            f"redeploys, sleeps and wakes, or its container restarts. To prevent data loss, you must "
+            f"<b>download a backup before every code push</b> and <b>upload it back after redeploy</b>."
+            f"</span></div>",
+            unsafe_allow_html=True,
+        )
+
+        # ── Status card ──
+        st.markdown(
+            f"<div style='background:var(--bg-surface);border:1px solid var(--border-2);"
+            f"border-left:4px solid {risk_color};border-radius:10px;padding:14px 18px;margin-bottom:14px;'>"
+            f"<div style='display:flex;align-items:center;gap:12px;'>"
+            f"<div style='font-size:1.6rem;'>{risk_emoji}</div>"
+            f"<div><b style='color:{risk_color};font-size:1rem;'>Current Status</b><br>"
+            f"<span style='color:var(--text-muted);font-size:0.84rem;'>{risk_msg}</span></div></div>"
+            f"<div style='color:var(--text-dim);font-size:0.74rem;margin-top:8px;'>"
+            f"📂 Data dir: <code>{backup_status.get('data_dir','.')}</code>  ·  "
+            f"📄 {len(files_info)} JSON files  ·  "
+            f"Storage: <b>{db.get_backend_kind()}</b>"
+            f"</div></div>",
+            unsafe_allow_html=True,
+        )
+
+        # ── Big Download / Upload buttons ──
+        dl_col, ul_col = st.columns(2)
+
+        with dl_col:
             st.markdown(
-                f"<div style='background:var(--bg-surface);border:1px solid var(--border-2);"
-                f"border-left:3px solid {backend_color};border-radius:10px;padding:12px 16px;'>"
-                f"<div style='color:var(--text-dim);font-size:0.7rem;text-transform:uppercase;"
-                f"letter-spacing:0.1em;margin-bottom:4px;'>Active Backend</div>"
-                f"<div style='color:{backend_color};font-size:1.2rem;font-weight:700;'>{backend_kind}</div>"
-                f"<div style='color:var(--text-muted);font-size:0.78rem;margin-top:4px;'>"
-                f"{_backend_caption}"
-                f"</div></div>",
+                "<div style='color:var(--text);font-size:0.92rem;margin-bottom:4px;'>"
+                "<b>📥 Download Backup</b></div>"
+                "<div style='color:var(--text-muted);font-size:0.78rem;margin-bottom:8px;'>"
+                "Saves a ZIP of every JSON file. Do this BEFORE you push code or close the tab for a while.</div>",
                 unsafe_allow_html=True,
             )
-            if init_err:
-                st.warning(f"⚠️ {init_err}")
-
-        with col_b:
-            if backend_kind == "SQLite":
-                bup_color = "#22c55e" if backup_status["configured"] else "#64748b"
-                bup_text  = ("Configured" if backup_status["configured"]
-                             else "NOT configured — data is at risk on Streamlit Cloud!")
-                if backup_status["configured"]:
-                    _bup_detail = (f"Repo: {backup_status['repo']}<br>"
-                                   f"Branch: {backup_status['branch']}<br>"
-                                   f"Last push: {backup_status['last_push']}")
-                else:
-                    _bup_detail = "Set THRIVO_BACKUP_PAT and THRIVO_BACKUP_REPO env vars / secrets."
-                st.markdown(
-                    f"<div style='background:var(--bg-surface);border:1px solid var(--border-2);"
-                    f"border-left:3px solid {bup_color};border-radius:10px;padding:12px 16px;'>"
-                    f"<div style='color:var(--text-dim);font-size:0.7rem;text-transform:uppercase;"
-                    f"letter-spacing:0.1em;margin-bottom:4px;'>GitHub Backup</div>"
-                    f"<div style='color:{bup_color};font-size:1rem;font-weight:600;'>{bup_text}</div>"
-                    f"<div style='color:var(--text-muted);font-size:0.78rem;margin-top:4px;'>"
-                    f"{_bup_detail}"
-                    f"</div></div>",
-                    unsafe_allow_html=True,
+            try:
+                zip_bytes = db.export_all_as_zip()
+                fname = f"thrivo_backup_{datetime.date.today().isoformat()}_{datetime.datetime.now().strftime('%H%M')}.zip"
+                st.download_button(
+                    f"📥  Download backup ({len(zip_bytes)/1024:.1f} KB)",
+                    data=zip_bytes,
+                    file_name=fname,
+                    mime="application/zip",
+                    use_container_width=True,
+                    type="primary",
                 )
-            else:
-                st.info(f"Backup mechanism is SQLite-only. {backend_kind} has its own persistence.")
+            except Exception as e:
+                st.error(f"Could not generate backup: {e}")
 
-        st.markdown("")
-        col_x, col_y = st.columns(2)
-        with col_x:
-            if backend_kind == "SQLite" and backup_status["configured"]:
-                if st.button("🔄 Force backup now", use_container_width=True):
-                    ok, msg = db.force_backup_now()
-                    if ok:
-                        st.success(f"✓ Backed up: {msg}")
-                    else:
-                        st.error(f"✗ Failed: {msg}")
-        with col_y:
-            if backend_kind == "SQLite":
-                db_bytes = db.export_db_bytes()
-                if db_bytes:
-                    st.download_button(
-                        f"📥 Download thrivo.db ({len(db_bytes)/1024:.1f} KB)",
-                        data=db_bytes,
-                        file_name=f"thrivo_{datetime.date.today().isoformat()}.db",
-                        mime="application/octet-stream",
-                        use_container_width=True,
+        with ul_col:
+            st.markdown(
+                "<div style='color:var(--text);font-size:0.92rem;margin-bottom:4px;'>"
+                "<b>📤 Upload Backup</b></div>"
+                "<div style='color:var(--text-muted);font-size:0.78rem;margin-bottom:8px;'>"
+                "Restore from a previously-downloaded ZIP. Overwrites existing data — be careful.</div>",
+                unsafe_allow_html=True,
+            )
+            upload = st.file_uploader(
+                "Choose a thrivo_backup_*.zip file",
+                type=["zip"],
+                key="thrivo_restore_uploader",
+                label_visibility="collapsed",
+            )
+            if upload is not None:
+                confirm = st.checkbox(
+                    "⚠️ I understand this OVERWRITES current data with the uploaded backup",
+                    key="thrivo_restore_confirm",
+                )
+                if confirm:
+                    if st.button("🔄 Restore from this backup", type="primary",
+                                 use_container_width=True, key="thrivo_restore_go"):
+                        try:
+                            count, msg = db.import_from_zip(upload.getvalue())
+                            if count > 0:
+                                st.success(f"✓ {msg}. Refresh the page to see restored data.")
+                                st.cache_data.clear()
+                            else:
+                                st.error(f"✗ {msg}")
+                        except Exception as e:
+                            st.error(f"Restore failed: {e}")
+
+        # ── File inventory (collapsible — for debugging) ──
+        if files_info:
+            with st.expander(f"📋 File inventory ({len(files_info)} files)", expanded=False):
+                for f in sorted(files_info, key=lambda x: x.get("modified_ts", 0), reverse=True):
+                    fsize_kb = f["size_bytes"] / 1024
+                    st.markdown(
+                        f"<div style='display:flex;justify-content:space-between;"
+                        f"padding:4px 0;border-bottom:1px solid var(--border-2);'>"
+                        f"<span style='font-family:JetBrains Mono,monospace;font-size:0.82rem;color:var(--text);'>"
+                        f"{f['name']}</span>"
+                        f"<span style='font-family:JetBrains Mono,monospace;font-size:0.76rem;color:var(--text-muted);'>"
+                        f"{fsize_kb:.1f} KB · {f['modified'][:19].replace('T',' ')}</span>"
+                        f"</div>",
+                        unsafe_allow_html=True,
                     )
+
+        # ── Backup discipline tip ──
+        st.markdown(
+            "<div style='background:rgba(59,130,246,0.08);border-left:3px solid #3b82f6;"
+            "border-radius:6px;padding:10px 14px;margin-top:14px;font-size:0.82rem;color:var(--text-muted);'>"
+            "<b style='color:#60a5fa;'>💡 Backup discipline</b><br>"
+            "• Download a backup right before every <code>git push</code><br>"
+            "• Download daily even if you don't push, in case Streamlit restarts your container<br>"
+            "• Keep the last 5–10 backup ZIPs locally — they're tiny<br>"
+            "• Name them by date so you can roll back if needed"
+            "</div>",
+            unsafe_allow_html=True,
+        )
 
     # ── PENDING APPROVALS (shown first if any) ──
     pending = {u: d for u, d in users.items() if d.get("status") == "pending"}
@@ -1633,7 +1761,7 @@ def _get_default_user_data():
             "transactions": [], "installment_plans": [],
             "limits": {"QNB": 0, "EGBank": 0},        # legacy — kept for backward compat
             "balances": {"QNB": 0, "EGBank": 0},      # legacy — kept for backward compat
-            "accounts": []                             # v10.2+ — flexible: cards & installment programs
+            "accounts": []                             # v11.2+ — flexible: cards & installment programs
         },
         "gym": {"sessions": [], "workouts": [], "habits": []},
         "stocks": {"watchlist": [], "price_history": {}},
@@ -1651,7 +1779,13 @@ def _get_default_user_data():
         "habits":   {"list": [], "log": {}},                     # habits: [{id,name,icon,target_days,created}], log: {YYYY-MM-DD: [habit_id,...]}
         "pomodoro": {"sessions": [], "settings": {"focus_min": 25, "break_min": 5, "long_break_min": 15, "long_every": 4}},
         "okr":      {"objectives": [], "checkins": []},          # quarterly OKRs + weekly check-ins
-        "buytime":  {"watchlist": [], "savings_log": []},        # v10.1: planned purchases + savings tracker
+        "buytime":  {"watchlist": [], "savings_log": []},        # v11.1: planned purchases + savings tracker
+        # ── v11: customizable daily protocol per user ──
+        # Each item: {"id":"abc","emoji":"🧠","name":"Deep Work","time":"10:00 AM","block":"work"|"evening"}
+        # Empty by default; users add their own via the Manage UI on Daily Tracker.
+        # Old users get migrated from t1_ds..t4_life history (see load_user_data).
+        # Completion stored per day in history[date]["protocol_done"] = {task_id: bool}.
+        "protocol_tasks": [],
     }
 
 def load_user_data():
@@ -1669,7 +1803,27 @@ def load_user_data():
     # Patch credit sub-keys (legacy)
     if "limits"   not in d["credit"]: d["credit"]["limits"]   = {"QNB": 0, "EGBank": 0}
     if "balances" not in d["credit"]: d["credit"]["balances"] = {"QNB": 0, "EGBank": 0}
-    if "accounts" not in d["credit"]: d["credit"]["accounts"] = []   # v10.2+ — flexible accounts
+    if "accounts" not in d["credit"]: d["credit"]["accounts"] = []   # v11.2+ — flexible accounts
+
+    # ── v11: migrate existing users to custom protocol_tasks ──
+    # New users get an empty list (they'll be prompted to add tasks).
+    # Existing users with legacy t1_ds..t4_life history get auto-seeded
+    # with the legacy 4 tasks so their experience isn't disrupted.
+    if "protocol_tasks" not in d or not isinstance(d["protocol_tasks"], list):
+        d["protocol_tasks"] = []
+    if not d["protocol_tasks"]:
+        has_legacy_history = any(
+            any(day.get(k) for k in ("t1_ds", "t2_de", "t3_gym", "t4_life"))
+            for day in (d.get("history") or {}).values()
+            if isinstance(day, dict)
+        )
+        if has_legacy_history:
+            d["protocol_tasks"] = [
+                {"id": "t1_ds",   "emoji": "🧠", "name": "Deep Work",    "time": "10:00 AM", "block": "work"},
+                {"id": "t2_de",   "emoji": "🇩🇪", "name": "German Study", "time": "01:00 PM", "block": "work"},
+                {"id": "t3_gym",  "emoji": "🏋️", "name": "Gym",          "time": "05:30 PM", "block": "evening"},
+                {"id": "t4_life", "emoji": "❤️", "name": "Family Time",  "time": "07:00 PM", "block": "evening"},
+            ]
     return d
 
 def save_data(d):
@@ -1677,6 +1831,32 @@ def save_data(d):
     db.save_user_data(_current_username, d)
 
 data = load_user_data()
+
+
+# ──────────────────────────────────────────────────────────────────────
+#  v11 — PROTOCOL TASK HELPERS
+#  ─────────────────────────────────────────────────────────────────────
+#  Wraps the new `protocol_tasks` + per-day `protocol_done` schema while
+#  staying backward-compatible with legacy t1_ds..t4_life top-level keys.
+# ──────────────────────────────────────────────────────────────────────
+LEGACY_TASK_IDS = {"t1_ds", "t2_de", "t3_gym", "t4_life"}
+
+def _is_task_done(day_data: dict, task_id: str) -> bool:
+    """Check whether a protocol task is marked done on a given day."""
+    if task_id in LEGACY_TASK_IDS:
+        return bool(day_data.get(task_id, False))
+    return bool((day_data.get("protocol_done") or {}).get(task_id, False))
+
+def _set_task_done(day_data: dict, task_id: str, value: bool) -> None:
+    """Mark a protocol task done/undone for a given day. Maintains legacy
+    top-level keys when applicable so old reports keep working."""
+    if task_id in LEGACY_TASK_IDS:
+        day_data[task_id] = bool(value)
+    else:
+        day_data.setdefault("protocol_done", {})[task_id] = bool(value)
+
+def _count_protocol_done(day_data: dict, tasks: list) -> int:
+    return sum(1 for t in tasks if _is_task_done(day_data, t["id"]))
 
 
 # ── Prayer times helper (module scope — available to all pages) ──
@@ -1817,14 +1997,20 @@ with st.sidebar:
 
     st.divider()
     st.markdown("<p style='font-size:0.7rem;color:#475569;letter-spacing:0.1em;text-transform:uppercase;'>This Week</p>", unsafe_allow_html=True)
-    fixed_tasks_sidebar = ["t1_ds", "t2_de", "t3_gym", "t4_life"]
+    sidebar_tasks = data.get("protocol_tasks", []) or []
+    total_sidebar = len(sidebar_tasks)
     week_cols = st.columns(7)
     for i, col in enumerate(week_cols):
         day_offset = today - datetime.timedelta(days=6 - i)
         d_str = day_offset.strftime("%Y-%m-%d")
         day_data_s = data["history"].get(d_str, {})
-        done_count = sum(1 for k in fixed_tasks_sidebar if day_data_s.get(k, False))
-        wcolor = "#22c55e" if done_count == 4 else "#eab308" if done_count >= 2 else "#1e3a5f" if done_count > 0 else "#0d1117"
+        done_count = _count_protocol_done(day_data_s, sidebar_tasks)
+        if total_sidebar > 0:
+            pct = done_count / total_sidebar
+            wcolor = ("#22c55e" if pct >= 0.99 else "#eab308" if pct >= 0.5 else
+                      "#1e3a5f" if done_count > 0 else "#0d1117")
+        else:
+            wcolor = "#0d1117"
         day_letter = day_offset.strftime("%a")[0]
         col.markdown(
             f"<div style='background:{wcolor};border-radius:4px;width:100%;aspect-ratio:1;'></div>"
@@ -2128,8 +2314,9 @@ Be specific, inspiring, and concise. Format as a simple bulleted list."""
     day_data = data["history"][current_day_str]
 
     # --- CALCULATE METRICS ---
-    fixed_tasks = ["t1_ds", "t2_de", "t3_gym", "t4_life"]
-    completed_fixed = sum(1 for k in fixed_tasks if day_data.get(k, False))
+    protocol_tasks = data.get("protocol_tasks", []) or []
+    completed_fixed = _count_protocol_done(day_data, protocol_tasks)
+    total_protocol = len(protocol_tasks)
 
     # FIXED: Only show daily extras for the SELECTED date
     daily_goals_for_day = [g for g in data["goals"]["daily"] if g.get("date") == current_day_str]
@@ -2137,8 +2324,8 @@ Be specific, inspiring, and concise. Format as a simple bulleted list."""
     valid_completed_custom = [gid for gid in completed_custom_ids if any(g['id'] == gid for g in daily_goals_for_day)]
     completed_custom = len(valid_completed_custom)
 
-    total_tasks = 4 + len(daily_goals_for_day)
-    progress = (completed_fixed + completed_custom) / total_tasks if total_tasks > 0 else 0
+    total_tasks = total_protocol + len(daily_goals_for_day)
+    progress = ((completed_fixed + completed_custom) / total_tasks) if total_tasks > 0 else 0
 
     # Grade
     if progress >= 1.0:
@@ -2161,7 +2348,7 @@ Be specific, inspiring, and concise. Format as a simple bulleted list."""
     for d_key in sorted_dates:
         if d_key > today_iso:
             continue
-        d_done = sum(1 for k in fixed_tasks if data["history"][d_key].get(k, False))
+        d_done = _count_protocol_done(data["history"][d_key], protocol_tasks)
         if d_done > 0:
             streak += 1
         else:
@@ -2192,8 +2379,8 @@ Be specific, inspiring, and concise. Format as a simple bulleted list."""
 
     # ── ANIMATED PROGRESS BAR ──
     bar_segments = ""
-    for i, tk in enumerate(fixed_tasks):
-        done = day_data.get(tk, False)
+    for t in protocol_tasks:
+        done = _is_task_done(day_data, t["id"])
         c = grade_color if done else "#1e293b"
         bar_segments += f"<div style='flex:1; height:8px; background:{c}; border-radius:2px; transition:background 0.4s;'></div>"
 
@@ -2210,26 +2397,143 @@ Be specific, inspiring, and concise. Format as a simple bulleted list."""
 
     with col_left:
         # PROTOCOL SECTIONS
-        st.markdown("""<h3 style='margin-bottom:12px;'>⚡ Today's Protocol</h3>""", unsafe_allow_html=True)
+        h_col1, h_col2 = st.columns([4, 1])
+        with h_col1:
+            st.markdown("""<h3 style='margin-bottom:12px;'>⚡ Today's Protocol</h3>""", unsafe_allow_html=True)
+        with h_col2:
+            manage = st.toggle("✏️ Manage", value=False, key=f"protocol_manage_{current_day_str}",
+                               help="Add, edit, reorder, or delete your daily protocol tasks")
+
+        # Split tasks by block
+        work_tasks    = [t for t in protocol_tasks if t.get("block", "work") == "work"]
+        evening_tasks = [t for t in protocol_tasks if t.get("block", "work") == "evening"]
+
+        # ── Empty state for new users ──
+        if not protocol_tasks and not manage:
+            st.markdown(
+                "<div style='background:rgba(167,139,250,0.08); border:1px dashed #a78bfa; "
+                "border-radius:12px; padding:24px 20px; text-align:center; margin-bottom:12px;'>"
+                "<div style='font-size:1.8rem; margin-bottom:8px;'>🎯</div>"
+                "<div style='color:#e2e8f0; font-weight:600; margin-bottom:6px;'>"
+                "Set up your daily protocol</div>"
+                "<div style='color:#94a3b8; font-size:0.86rem; line-height:1.5;'>"
+                "Add recurring tasks you want to track every day — e.g. Workout, Read, "
+                "Meditate. Toggle <b>✏️ Manage</b> above to begin.<br>"
+                "For one-off tasks (today only), use the <b>➕ Extras</b> tab.</div>"
+                "</div>",
+                unsafe_allow_html=True,
+            )
+
+        # ── Management editor (add/edit/reorder/delete) ──
+        if manage:
+            st.caption("Recurring tasks appear every day. Use the **➕ Extras** tab for one-off tasks.")
+            for idx, t in enumerate(protocol_tasks):
+                ecols = st.columns([1, 2, 3, 2, 1, 1, 1])
+                with ecols[0]:
+                    new_emoji = st.text_input(" ", value=t.get("emoji", "✅"),
+                                              key=f"pe_emoji_{t['id']}", max_chars=4,
+                                              label_visibility="collapsed")
+                with ecols[1]:
+                    new_time = st.text_input(" ", value=t.get("time", ""),
+                                             key=f"pe_time_{t['id']}",
+                                             placeholder="9:00 AM",
+                                             label_visibility="collapsed")
+                with ecols[2]:
+                    new_name = st.text_input(" ", value=t.get("name", ""),
+                                             key=f"pe_name_{t['id']}",
+                                             placeholder="Task name",
+                                             label_visibility="collapsed")
+                with ecols[3]:
+                    block_opts = ["work", "evening"]
+                    cur_block = t.get("block", "work") if t.get("block", "work") in block_opts else "work"
+                    new_block = st.selectbox(
+                        " ", options=block_opts,
+                        index=block_opts.index(cur_block),
+                        key=f"pe_block_{t['id']}",
+                        format_func=lambda x: "☀️ Work" if x == "work" else "🌙 Evening",
+                        label_visibility="collapsed",
+                    )
+                with ecols[4]:
+                    if st.button("⬆️", key=f"pe_up_{t['id']}", disabled=idx == 0,
+                                 help="Move up"):
+                        protocol_tasks[idx-1], protocol_tasks[idx] = protocol_tasks[idx], protocol_tasks[idx-1]
+                        data["protocol_tasks"] = protocol_tasks
+                        save_data(data); st.rerun()
+                with ecols[5]:
+                    if st.button("⬇️", key=f"pe_dn_{t['id']}",
+                                 disabled=idx == len(protocol_tasks) - 1,
+                                 help="Move down"):
+                        protocol_tasks[idx+1], protocol_tasks[idx] = protocol_tasks[idx], protocol_tasks[idx+1]
+                        data["protocol_tasks"] = protocol_tasks
+                        save_data(data); st.rerun()
+                with ecols[6]:
+                    if st.button("🗑️", key=f"pe_del_{t['id']}",
+                                 help="Delete this task"):
+                        data["protocol_tasks"] = [x for x in protocol_tasks if x["id"] != t["id"]]
+                        save_data(data); st.rerun()
+
+                # Save edits if any field changed
+                if (new_emoji != t.get("emoji") or new_time != t.get("time")
+                        or new_name != t.get("name") or new_block != t.get("block")):
+                    t["emoji"] = (new_emoji[:4] if new_emoji else "✅")
+                    t["time"]  = new_time.strip()
+                    t["name"]  = new_name.strip() or "Untitled"
+                    t["block"] = new_block
+                    save_data(data)
+
+            # Add new task form
+            st.markdown("---")
+            with st.form(f"protocol_add_{current_day_str}", clear_on_submit=True):
+                st.markdown("**➕ Add a recurring task**")
+                ac = st.columns([1, 2, 3, 2, 1])
+                add_e = ac[0].text_input(" ", value="✅", max_chars=4, label_visibility="collapsed",
+                                         key=f"add_e_{current_day_str}")
+                add_t = ac[1].text_input(" ", placeholder="9:00 AM", label_visibility="collapsed",
+                                         key=f"add_t_{current_day_str}")
+                add_n = ac[2].text_input(" ", placeholder="Meditate", label_visibility="collapsed",
+                                         key=f"add_n_{current_day_str}")
+                add_b = ac[3].selectbox(" ", options=["work", "evening"],
+                                        format_func=lambda x: "☀️ Work" if x == "work" else "🌙 Evening",
+                                        label_visibility="collapsed", key=f"add_b_{current_day_str}")
+                add_submitted = ac[4].form_submit_button("Add", type="primary", use_container_width=True)
+                if add_submitted and add_n.strip():
+                    import uuid
+                    protocol_tasks.append({
+                        "id":    f"pt_{uuid.uuid4().hex[:10]}",
+                        "emoji": (add_e[:4] if add_e else "✅"),
+                        "name":  add_n.strip(),
+                        "time":  add_t.strip(),
+                        "block": add_b,
+                    })
+                    data["protocol_tasks"] = protocol_tasks
+                    save_data(data); st.rerun()
+            st.markdown("---")
 
         tab_work, tab_evening, tab_extra = st.tabs(["☀️ Work Block", "🌙 Evening Block", "➕ Extras"])
 
+        def _render_task_checkbox(task: dict):
+            tid = task["id"]
+            current = _is_task_done(day_data, tid)
+            label_parts = [task.get("emoji", "✅"), task.get("name", "Untitled")]
+            label = " ".join(p for p in label_parts if p)
+            if task.get("time"):
+                label += f" ({task['time']})"
+            new_val = st.checkbox(label, value=current, key=f"dt_{tid}_{current_day_str}")
+            if new_val != current:
+                _set_task_done(day_data, tid, new_val)
+                save_data(data)
+                st.rerun()
+
         with tab_work:
             st.markdown("<div style='padding: 8px 0;'></div>", unsafe_allow_html=True)
-            chk1 = st.checkbox("🧠 Deep Work (10:00 AM)", value=day_data["t1_ds"], key=f"dt_t1_{current_day_str}")
-            if chk1 != day_data["t1_ds"]:
-                day_data["t1_ds"] = chk1
-                save_data(data)
-                st.rerun()
-
-            chk2 = st.checkbox("🇩🇪 German Study (01:00 PM)", value=day_data["t2_de"], key=f"dt_t2_{current_day_str}")
-            if chk2 != day_data["t2_de"]:
-                day_data["t2_de"] = chk2
-                save_data(data)
-                st.rerun()
+            if work_tasks:
+                for t in work_tasks:
+                    _render_task_checkbox(t)
+            else:
+                st.caption("No work-block tasks. Toggle ✏️ Manage to add some.")
 
             st.markdown("---")
-            # Mood + Energy sliders
+            # Mood + Energy sliders (preserved from original)
             mood_val = day_data.get("mood", 3)
             energy_val = day_data.get("energy", 3)
             mood_emojis = ["😞", "😕", "😐", "😊", "🔥"]
@@ -2251,19 +2555,13 @@ Be specific, inspiring, and concise. Format as a simple bulleted list."""
 
         with tab_evening:
             st.markdown("<div style='padding: 8px 0;'></div>", unsafe_allow_html=True)
-            chk3 = st.checkbox("🏋️‍♂️ Gym (05:30 PM)", value=day_data["t3_gym"], key=f"dt_t3_{current_day_str}")
-            if chk3 != day_data["t3_gym"]:
-                day_data["t3_gym"] = chk3
-                save_data(data)
-                st.rerun()
+            if evening_tasks:
+                for t in evening_tasks:
+                    _render_task_checkbox(t)
+            else:
+                st.caption("No evening-block tasks. Toggle ✏️ Manage to add some.")
 
-            chk4 = st.checkbox("❤️ Family Time (07:00 PM)", value=day_data["t4_life"], key=f"dt_t4_{current_day_str}")
-            if chk4 != day_data["t4_life"]:
-                day_data["t4_life"] = chk4
-                save_data(data)
-                st.rerun()
-
-            # Quick daily note
+            # Quick daily note (preserved from original)
             st.markdown("---")
             st.markdown("<p style='color:#64748b; font-size:0.8rem;'>Quick Note</p>", unsafe_allow_html=True)
             current_note = day_data.get("note", "")
@@ -2359,15 +2657,19 @@ Be specific, inspiring, and concise. Format as a simple bulleted list."""
 
         st.markdown("<br>", unsafe_allow_html=True)
 
-        # ── QUICK INSIGHTS PANEL (NEW) ──
+        # ── QUICK INSIGHTS PANEL ──
         st.markdown("""<h3 style='margin-bottom:8px;'>💡 Insights</h3>""", unsafe_allow_html=True)
 
-        # Calculate 7-day stats
+        # Calculate 7-day stats — uses the user's actual protocol_tasks
+        # (not the legacy hardcoded fixed_tasks list — that variable was
+        # removed in v11 when we made the protocol customizable, and any
+        # leftover reference to it was crashing the Daily Tracker).
+        n_tasks = max(1, len(protocol_tasks))
         last_7 = []
         for i in range(7):
             d_key = (today - datetime.timedelta(days=i)).strftime("%Y-%m-%d")
             d_hist = data["history"].get(d_key, {})
-            tasks_done = sum(1 for k in fixed_tasks if d_hist.get(k, False))
+            tasks_done = _count_protocol_done(d_hist, protocol_tasks)
             prayers = sum(1 for v in d_hist.get("prayers", {}).values() if v)
             last_7.append({"tasks": tasks_done, "prayers": prayers})
 
@@ -2378,12 +2680,17 @@ Be specific, inspiring, and concise. Format as a simple bulleted list."""
         def insight_card(text):
             st.markdown(f"<div class='insight-card'>{text}</div>", unsafe_allow_html=True)
 
-        if avg_tasks >= 3:
-            insight_card(f"🔥 Averaging <b>{avg_tasks:.1f}/4</b> tasks this week — strong consistency!")
-        elif avg_tasks >= 2:
-            insight_card(f"📈 Averaging <b>{avg_tasks:.1f}/4</b> tasks — room to push harder.")
+        # Scale the "strong/weak" thresholds proportionally to the user's task count
+        strong_threshold = 0.75 * n_tasks
+        medium_threshold = 0.50 * n_tasks
+        if not protocol_tasks:
+            insight_card("➕ No protocol tasks yet — toggle <b>✏️ Manage</b> to add some.")
+        elif avg_tasks >= strong_threshold:
+            insight_card(f"🔥 Averaging <b>{avg_tasks:.1f}/{n_tasks}</b> tasks this week — strong consistency!")
+        elif avg_tasks >= medium_threshold:
+            insight_card(f"📈 Averaging <b>{avg_tasks:.1f}/{n_tasks}</b> tasks — room to push harder.")
         else:
-            insight_card(f"⚠️ Only <b>{avg_tasks:.1f}/4</b> avg tasks this week — time to refocus.")
+            insight_card(f"⚠️ Only <b>{avg_tasks:.1f}/{n_tasks}</b> avg tasks this week — time to refocus.")
 
         if avg_prayers >= 4:
             insight_card(f"🕌 Prayer avg: <b>{avg_prayers:.1f}/5</b> — excellent spiritual consistency.")
@@ -2404,7 +2711,7 @@ Be specific, inspiring, and concise. Format as a simple bulleted list."""
     with chart_tab1:
         heatmap_data = []
         for date_key, values in data["history"].items():
-            done = sum(1 for k in fixed_tasks if values.get(k, False))
+            done = _count_protocol_done(values, protocol_tasks)
             heatmap_data.append({"Date": date_key, "Tasks": done})
         df_heat = pd.DataFrame(heatmap_data)
         if not df_heat.empty:
@@ -3156,7 +3463,7 @@ elif st.session_state['page'] == 'Finance':
                 f"<div style='color:#fb923c;font-family:JetBrains Mono,monospace;font-size:0.9rem;margin-top:4px;'>"
                 f"This month total: {month_total:,.0f} EGP</div>", unsafe_allow_html=True)
 
-        # ── Month-over-month health indicator + PNG export (v10.3+) ──
+        # ── Month-over-month health indicator + PNG export (v11.3+) ──
         # Compares THIS month's extras to LAST month's. Shows a colored health
         # banner and a button to download a styled PNG report of last month.
         st.markdown("---")
@@ -3518,7 +3825,7 @@ elif st.session_state['page'] == 'Credit':
     today_dt = datetime.date.today()
     current_month_str = today_dt.strftime("%Y-%m")
 
-    # ── My Accounts (v10.2+) — flexible card / installment-program manager ──
+    # ── My Accounts (v11.2+) — flexible card / installment-program manager ──
     accounts = credit.setdefault("accounts", [])
 
     # Catalog of common providers — pre-populated for convenience
@@ -7115,13 +7422,16 @@ elif st.session_state['page'] == 'Notes':
     if days_with_notes:
         for d_key, note in days_with_notes:
             d_obj = datetime.datetime.strptime(d_key, "%Y-%m-%d")
-            tasks_done = sum(1 for k in ["t1_ds", "t2_de", "t3_gym", "t4_life"]
-                             if data["history"].get(d_key, {}).get(k, False))
+            tasks_done = _count_protocol_done(
+                data["history"].get(d_key, {}),
+                data.get("protocol_tasks", []) or []
+            )
+            total_p = max(1, len(data.get("protocol_tasks", []) or []))
             st.markdown(f"""
             <div style='background:#0d1b2a; border:1px solid #1e3a5f; border-radius:12px; padding:16px 20px; margin-bottom:12px;'>
                 <div style='display:flex; justify-content:space-between; margin-bottom:8px;'>
                     <span style='color:#60a5fa; font-weight:600; font-size:0.95rem;'>{d_obj.strftime('%A, %b %d')}</span>
-                    <span style='color:#475569; font-size:0.8rem; font-family:JetBrains Mono,monospace;'>{tasks_done}/4 tasks</span>
+                    <span style='color:#475569; font-size:0.8rem; font-family:JetBrains Mono,monospace;'>{tasks_done}/{total_p} tasks</span>
                 </div>
                 <p style='color:#cbd5e1; margin:0; font-size:0.88rem; line-height:1.6;'>{note}</p>
             </div>
@@ -7194,19 +7504,26 @@ elif st.session_state['page'] == 'Reports':
             fig.patch.set_facecolor(BG_BOT)
 
             d = data["history"].get(current_day_str, {})
-            done_count = sum(1 for k in ["t1_ds", "t2_de", "t3_gym", "t4_life"] if d.get(k))
-            pct       = int((done_count / 4) * 100)
-            p_done    = sum(1 for v in d.get("prayers", {}).values() if v)
-            mood      = d.get("mood", 3)
-            energy    = d.get("energy", 3)
+            # Use the user's CURRENT protocol_tasks for counts (v11):
+            # this means deleting/adding a task immediately reflects in the
+            # downloaded daily report PNG. If a user has no tasks yet, we
+            # show 0/0 instead of crashing on division.
+            user_protocol = data.get("protocol_tasks", []) or []
+            total_protocol = len(user_protocol)
+            done_count = _count_protocol_done(d, user_protocol)
+            pct        = int((done_count / total_protocol) * 100) if total_protocol > 0 else 0
+            p_done     = sum(1 for v in d.get("prayers", {}).values() if v)
+            mood       = d.get("mood", 3)
+            energy     = d.get("energy", 3)
 
-            # Compute current streak
+            # Compute current streak — counts any day with at least one
+            # protocol task done (uses the user's CURRENT task list).
             streak = 0
             d_check = selected_date
             while True:
                 key = d_check.strftime("%Y-%m-%d")
                 day_h = data["history"].get(key, {})
-                if any(day_h.get(t) for t in ["t1_ds", "t2_de", "t3_gym", "t4_life"]):
+                if any(_is_task_done(day_h, t["id"]) for t in user_protocol):
                     streak += 1
                     d_check -= datetime.timedelta(days=1)
                 else:
@@ -7329,40 +7646,58 @@ elif st.session_state['page'] == 'Reports':
             col_h    = 33
             col_w    = 42
 
-            # PROTOCOLS card
+            # PROTOCOLS card — dynamic over user_protocol (v11)
             ax.add_patch(mpatches.FancyBboxPatch(
                 (cards_x, col_y - col_h + 5), col_w, col_h,
                 boxstyle="round,pad=0.1,rounding_size=2",
                 facecolor=CARD_BG2, edgecolor="#334155", linewidth=1))
             ax.text(cards_x + 2, col_y + 2, "🎯  PROTOCOLS", fontsize=10,
                     color=BLUE, weight="bold")
-            task_labels = [
-                ("Deep Work",     "t1_ds",  "📚"),
-                ("German Study",  "t2_de",  "🇩🇪"),
-                ("Gym",           "t3_gym", "💪"),
-                ("Family",        "t4_life","❤️"),
-            ]
-            ty = col_y - 3
-            for lbl, k, em in task_labels:
-                is_done = d.get(k, False)
-                # Status pill
-                status_color = ACCENT if is_done else "#475569"
-                status_text  = "DONE" if is_done else "skip"
-                ax.add_patch(mpatches.Circle((cards_x + 4, ty + 1), 1.2,
-                                              facecolor=status_color, edgecolor="none"))
-                if is_done:
-                    ax.text(cards_x + 4, ty + 1, "✓",
-                            ha="center", va="center", fontsize=8,
-                            color="#0f172a", weight="bold")
-                ax.text(cards_x + 8, ty + 1, lbl, fontsize=11,
-                        color=TEXT_HI if is_done else TEXT_DIM,
-                        weight="bold" if is_done else "normal",
-                        va="center")
-                # Status text on right
-                ax.text(cards_x + col_w - 3, ty + 1, status_text,
-                        fontsize=8, color=status_color,
-                        weight="bold", ha="right", va="center")
-                ty -= 6
+
+            if not user_protocol:
+                ax.text(cards_x + 4, col_y - 8,
+                        "No protocol tasks set.",
+                        fontsize=9, color=TEXT_DIM, style="italic")
+                ax.text(cards_x + 4, col_y - 12,
+                        "Add some on the Daily Tracker.",
+                        fontsize=8, color=TEXT_DIM, style="italic")
+            else:
+                # Dynamic row spacing — squeeze down if many tasks, cap at 6 shown
+                visible_tasks = user_protocol[:6]
+                overflow = len(user_protocol) - len(visible_tasks)
+                row_h = min(6, 26 / max(1, len(visible_tasks)))
+                ty = col_y - 3
+                for task in visible_tasks:
+                    is_done = _is_task_done(d, task["id"])
+                    status_color = ACCENT if is_done else "#475569"
+                    status_text  = "DONE" if is_done else "skip"
+
+                    # Status circle + check
+                    ax.add_patch(mpatches.Circle((cards_x + 4, ty + 1), 1.2,
+                                                  facecolor=status_color, edgecolor="none"))
+                    if is_done:
+                        ax.text(cards_x + 4, ty + 1, "✓",
+                                ha="center", va="center", fontsize=8,
+                                color="#0f172a", weight="bold")
+
+                    # Task name (omit emoji on PNG — matplotlib's font can't render most emoji)
+                    label = task.get("name", "Untitled")
+                    if len(label) > 22:
+                        label = label[:20] + "…"
+                    ax.text(cards_x + 8, ty + 1, label,
+                            fontsize=min(11, max(8, int(row_h * 1.8))),
+                            color=TEXT_HI if is_done else TEXT_DIM,
+                            weight="bold" if is_done else "normal",
+                            va="center")
+                    ax.text(cards_x + col_w - 3, ty + 1, status_text,
+                            fontsize=8, color=status_color,
+                            weight="bold", ha="right", va="center")
+                    ty -= row_h
+
+                if overflow > 0:
+                    ax.text(cards_x + 8, ty + 1,
+                            f"+ {overflow} more task{'s' if overflow != 1 else ''}",
+                            fontsize=8, color=TEXT_DIM, style="italic", va="center")
 
             # PRAYER LOG card
             cards_x_pr = cards_x + col_w + 4
@@ -7445,11 +7780,12 @@ elif st.session_state['page'] == 'Reports':
         st.subheader("Weekly Performance Summary")
 
         week_data = []
+        _weekly_protocol = data.get("protocol_tasks", []) or []
         for i in range(7):
             d_obj = datetime.date.today() - datetime.timedelta(days=6 - i)
             d_key = d_obj.strftime("%Y-%m-%d")
             d_hist = data["history"].get(d_key, {})
-            tasks = sum(1 for k in ["t1_ds", "t2_de", "t3_gym", "t4_life"] if d_hist.get(k, False))
+            tasks = _count_protocol_done(d_hist, _weekly_protocol)
             prayers = sum(1 for v in d_hist.get("prayers", {}).values() if v)
             week_data.append({
                 "Day": d_obj.strftime("%a"),
@@ -7500,19 +7836,24 @@ elif st.session_state['page'] == 'Reports':
         st.markdown("<br>", unsafe_allow_html=True)
         st.markdown("**History Summary Table**")
         history_rows = []
+        # Build one column per protocol task, named after the task.
+        # Falls back to no-task-columns if the user hasn't set up a protocol yet.
+        _hist_protocol = data.get("protocol_tasks", []) or []
         for d_key, v in sorted(data["history"].items(), reverse=True):
-            history_rows.append({
-                "Date": d_key,
-                "Deep Work": "✅" if v.get("t1_ds") else "❌",
-                "German": "✅" if v.get("t2_de") else "❌",
-                "Gym": "✅" if v.get("t3_gym") else "❌",
-                "Family": "✅" if v.get("t4_life") else "❌",
-                "Prayers": sum(1 for p in v.get("prayers", {}).values() if p),
-                "Mood": v.get("mood", "-"),
-                "Energy": v.get("energy", "-"),
-            })
+            row = {"Date": d_key}
+            for task in _hist_protocol:
+                # Truncate long names to keep the table readable
+                col_name = task.get("name", "Task")[:24]
+                row[col_name] = "✅" if _is_task_done(v, task["id"]) else "❌"
+            row["Prayers"] = sum(1 for p in v.get("prayers", {}).values() if p)
+            row["Mood"]    = v.get("mood", "-")
+            row["Energy"]  = v.get("energy", "-")
+            history_rows.append(row)
         if history_rows:
             st.dataframe(pd.DataFrame(history_rows), use_container_width=True)
+            if not _hist_protocol:
+                st.caption("💡 You have no protocol tasks set. Add some on the Daily Tracker → "
+                           "✏️ Manage to see per-task columns here.")
 
 # ==========================================
 # PAGE: HABIT TRACKER (v9 new)
@@ -7963,7 +8304,7 @@ elif st.session_state['page'] == 'GoalOS':
         st.markdown("---")
         st.subheader("➕ New Objective")
         with st.form("new_obj_form", clear_on_submit=True):
-            new_title = st.text_input("Objective *", placeholder="e.g. Launch Thrivo v10 to paying customers")
+            new_title = st.text_input("Objective *", placeholder="e.g. Launch Thrivo v11 to paying customers")
             new_why = st.text_area("Why it matters", placeholder="The deeper reason behind this goal...", height=60)
             st.markdown("**Key Results** (how you'll measure success — add 2-5)")
 
@@ -8382,11 +8723,11 @@ elif st.session_state['page'] == 'FinanceDash':
 
 
 # ==========================================
-# PAGE: SMART BUYING CALENDAR (v10 new — Pro+ feature)
+# PAGE: SMART BUYING CALENDAR (v11 new — Pro+ feature)
 
 
 # ==========================================
-# PAGE: SMART BUYING CALENDAR (v10.1 — UX redesign)
+# PAGE: SMART BUYING CALENDAR (v11.1 — UX redesign)
 # ==========================================
 elif st.session_state['page'] == 'BuyTime':
     # ──────────────────────────────────────────────────────────────────
@@ -9129,4 +9470,3 @@ elif st.session_state['page'] == 'BuyTime':
                         data["buytime"]["savings_log"] = [x for x in savings_log if x["id"] != s["id"]]
                         save_data(data)
                         st.rerun()
-

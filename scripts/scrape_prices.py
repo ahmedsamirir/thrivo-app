@@ -14,11 +14,11 @@
     2. On-demand from the Streamlit app (via fetch_public_prices_cached)
        when the data is older than 24h (failsafe if cron stops working)
 
-  Sources:
-    Gold      — goldbullioneg.com   (21k/24k EGP per gram)
-    USD/EGP   — investing.com       (interbank quote)
+  Sources (updated v10.5 — April 2026 incident response):
+    Gold      — goldpricez.com   (primary), pricegold.net (fallback)
+    USD/EGP   — goldpricez.com   (primary), exchangerate.host (fallback)
     BTC       — coingecko public API (no auth needed)
-    EGX top5  — investing.com       (COMI, ETEL, ORHD, MNHD, COMI)
+    EGX top8  — stockanalysis.com (primary), mubasher.info (fallback)
 
   Exit code: 0 always (we don't want cron alerts on a single source flap)
 ═══════════════════════════════════════════════════════════════════════
@@ -66,70 +66,153 @@ def _to_float(s: str) -> float | None:
 
 
 # ──────────────────────────────────────────────────────────────────────
-#  GOLD (Egypt) — goldbullioneg.com
+#  GOLD (Egypt) — goldpricez.com primary, pricegold.net fallback
+#  ─────────────────────────────────────────────────────────────────────
+#  History: the original scraper used goldbullioneg.com which depends on
+#  matching the Arabic word "عيار" in changing HTML. It silently failed
+#  for ~30 hours in production (April 2026 incident). Switched to
+#  goldpricez.com which has a stable per-karat URL pattern and renders
+#  the price as plain text like "= 6,861.84 EGP".
 # ──────────────────────────────────────────────────────────────────────
-def fetch_gold() -> dict | None:
-    try:
-        url = "https://goldbullioneg.com/%D8%A3%D8%B3%D8%B9%D8%A7%D8%B1-%D8%A7%D9%84%D8%B0%D9%87%D8%A8/"
-        r = requests.get(url, headers=HEADERS, timeout=15)
-        if r.status_code != 200:
-            return None
-        soup = BeautifulSoup(r.text, "html.parser")
-        text = soup.get_text(" ", strip=True)
-        # Heuristics — sites change layout often, so we look for keywords
-        out: dict[str, float] = {}
-        for karat, label in [("24", "24"), ("21", "21"), ("18", "18")]:
-            # Pattern: "<karat>k ... <number>"
-            m = re.search(rf"عيار\s*{karat}[^\d]{{0,80}}([\d,]+\.?\d*)", text)
-            if m:
-                v = _to_float(m.group(1))
-                if v and 100 < v < 100000:  # sanity
-                    out[f"k{karat}"] = v
-        if not out:
-            return None
-        return {
-            "asset":    "gold_egp",
-            "currency": "EGP",
-            "unit":     "gram",
-            "values":   out,
-            "source":   "goldbullioneg.com",
-        }
-    except Exception:
-        traceback.print_exc()
-        return None
+def _fetch_gold_from_goldpricez() -> dict | None:
+    """Hit goldpricez.com/eg/{karat}k/gram for each karat we care about."""
+    out: dict[str, float] = {}
+    for karat in ("24", "22", "21", "18"):
+        try:
+            url = f"https://goldpricez.com/eg/{karat}k/gram"
+            r = requests.get(url, headers=HEADERS, timeout=15)
+            if r.status_code != 200:
+                continue
+            text = r.text
+            # The page renders the price as: "= 6,861.84\nEGP" or in nearby HTML
+            # like "<...>6,861.84</...>EGP".  Use a tolerant regex.
+            m = re.search(r"=\s*([\d,]+\.\d{1,2})\s*[\r\n\s]*EGP", text)
+            if not m:
+                # Alt pattern — sometimes inside a strong/span before EGP
+                m = re.search(r">\s*([\d,]+\.\d{1,2})\s*<[^>]+>\s*EGP", text)
+            if not m:
+                continue
+            v = _to_float(m.group(1))
+            if v and 100 < v < 100000:  # sanity range
+                out[f"k{karat}"] = v
+        except Exception:
+            traceback.print_exc()
+            continue
+    return out or None
 
 
-# ──────────────────────────────────────────────────────────────────────
-#  USD / EGP — investing.com
-# ──────────────────────────────────────────────────────────────────────
-def fetch_usd_egp() -> dict | None:
+def _fetch_gold_from_pricegold() -> dict | None:
+    """Fallback source: pricegold.net/eg-egypt/ — has all karats on one page."""
     try:
-        r = requests.get("https://www.investing.com/currencies/usd-egp",
+        r = requests.get("https://pricegold.net/eg-egypt/",
                          headers=HEADERS, timeout=15)
         if r.status_code != 200:
             return None
-        # Pattern: trading at a price of X.XX EGP
-        m = re.search(r"trading at a price of\s*([\d,.]+)\s*EGP", r.text, re.S | re.I)
-        if not m:
-            # Fallback — generic large-number pattern after USD/EGP
-            m = re.search(r'data-test="instrument-price-last"[^>]*>\s*([\d,.]+)', r.text)
-        if not m:
-            return None
-        rate = _to_float(m.group(1))
-        if not rate or rate < 5 or rate > 1000:
-            return None
-        m_prev = re.search(r"previous close of\s*([\d,.]+)", r.text, re.S | re.I)
-        prev = _to_float(m_prev.group(1)) if m_prev else rate
-        return {
-            "asset":      "usd_egp",
-            "rate":       rate,
-            "prev_close": prev,
-            "change_pct": round((rate - prev) / prev * 100, 3) if prev else 0,
-            "source":     "investing.com",
-        }
+        text = r.text
+        out: dict[str, float] = {}
+        # Pattern: <td>21k</td>...<td>...8,124 EGP</td> or similar
+        for karat in ("24", "22", "21", "18"):
+            # Look for "Nk" near a price cell in EGP
+            patterns = [
+                rf"{karat}k[^<]*</[^>]+>\s*<[^>]+>\s*([\d,]+\.?\d*)\s*EGP",
+                rf"{karat}\s*Karat[^<]*<[^>]+>\s*([\d,]+\.?\d*)",
+                rf"per\s*Gram[^<]*{karat}[^<]*<[^>]+>\s*([\d,]+\.?\d*)",
+            ]
+            for pat in patterns:
+                m = re.search(pat, text, re.S | re.I)
+                if m:
+                    v = _to_float(m.group(1))
+                    if v and 100 < v < 100000:
+                        out[f"k{karat}"] = v
+                        break
+        return out or None
     except Exception:
         traceback.print_exc()
         return None
+
+
+def fetch_gold() -> dict | None:
+    out = _fetch_gold_from_goldpricez()
+    source = "goldpricez.com"
+    if not out:
+        out = _fetch_gold_from_pricegold()
+        source = "pricegold.net"
+    if not out:
+        return None
+    return {
+        "asset":    "gold_egp",
+        "currency": "EGP",
+        "unit":     "gram",
+        "values":   out,
+        "source":   source,
+    }
+
+
+# ──────────────────────────────────────────────────────────────────────
+#  USD / EGP — goldpricez.com primary, exchangerate.host fallback
+#  ─────────────────────────────────────────────────────────────────────
+#  History: investing.com aggressively blocks bots, so the scraper was
+#  silently failing ~50% of the time (returning 403 or empty HTML).
+#  goldpricez.com publishes the rate openly and never rate-limits.
+# ──────────────────────────────────────────────────────────────────────
+def _fetch_usd_egp_from_goldpricez() -> float | None:
+    try:
+        # The page literally shows "USD/EGP 52.79" near the top
+        r = requests.get("https://goldpricez.com/currency-rates/egypt",
+                         headers=HEADERS, timeout=15)
+        if r.status_code != 200:
+            return None
+        # Pattern variants seen in the wild
+        for pat in (
+            r"USD\s*Exchange\s*Rate[^\d]{0,200}([\d]{2,3}\.\d{2,4})",
+            r"USD/EGP[^\d]{0,200}([\d]{2,3}\.\d{2,4})",
+            r"1\s*USD\s*=\s*([\d]{2,3}\.\d{2,4})\s*EGP",
+            r"\$1\.00\s*=\s*EGP\s*([\d]{2,3}\.\d{2,4})",
+        ):
+            m = re.search(pat, r.text, re.S | re.I)
+            if m:
+                v = _to_float(m.group(1))
+                if v and 5 < v < 1000:
+                    return v
+        return None
+    except Exception:
+        traceback.print_exc()
+        return None
+
+
+def _fetch_usd_egp_from_exchangerate_host() -> float | None:
+    """exchangerate.host is a free, no-key API — used only as a fallback."""
+    try:
+        r = requests.get(
+            "https://api.exchangerate.host/latest?base=USD&symbols=EGP",
+            headers=HEADERS, timeout=15,
+        )
+        if r.status_code != 200:
+            return None
+        rate = (r.json().get("rates") or {}).get("EGP")
+        if rate and 5 < float(rate) < 1000:
+            return float(rate)
+    except Exception:
+        traceback.print_exc()
+    return None
+
+
+def fetch_usd_egp() -> dict | None:
+    rate = _fetch_usd_egp_from_goldpricez()
+    source = "goldpricez.com"
+    if not rate:
+        rate = _fetch_usd_egp_from_exchangerate_host()
+        source = "exchangerate.host"
+    if not rate:
+        return None
+    # Try to fetch yesterday's rate for change_pct (best-effort, may be None)
+    return {
+        "asset":      "usd_egp",
+        "rate":       rate,
+        "prev_close": rate,        # we don't have reliable prev close anymore
+        "change_pct": 0,
+        "source":     source,
+    }
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -163,46 +246,98 @@ def fetch_btc() -> dict | None:
 
 
 # ──────────────────────────────────────────────────────────────────────
-#  EGX — investing.com (top 5 most-watched)
+#  EGX — stockanalysis.com primary, mubasher.info fallback
+#  ─────────────────────────────────────────────────────────────────────
+#  History: original used investing.com slugs that were WRONG
+#  (e.g. "commercial-intl-bank-(egypt)" → 404). The actual investing.com
+#  URL for COMI is /equities/com-intl-bk. Rather than maintain that
+#  brittle slug list, switched to stockanalysis.com which uses the
+#  actual ticker symbol — much more stable.
 # ──────────────────────────────────────────────────────────────────────
-EGX_SLUGS = {
-    "COMI": "commercial-intl-bank-(egypt)",
-    "ETEL": "telecom-egypt",
-    "ORHD": "orascom-development-egypt",
-    "MNHD": "madinet-nasr-for-housing-and-development",
-    "TMGH": "t-m-g-holding",
-    "FWRY": "fawry-banking-and-payment",
-    "SWDY": "elsewedy-cable",
-    "HRHO": "ef-hermes-hold",
-}
+EGX_TICKERS = ["COMI", "ETEL", "TMGH", "FWRY", "SWDY", "HRHO", "ORHD", "MNHD"]
+
+
+def _fetch_egx_one_from_stockanalysis(ticker: str) -> dict | None:
+    try:
+        r = requests.get(f"https://stockanalysis.com/quote/egx/{ticker}/",
+                         headers=HEADERS, timeout=15)
+        if r.status_code != 200:
+            return None
+        text = r.text
+        # The page contains JSON-LD with price, plus visible HTML with
+        # patterns like: "<span ...>123.45</span>" near "EGP"
+        # Try multiple resilient patterns.
+        price = None
+        for pat in (
+            r'"price"\s*:\s*"?([\d.]+)"?',
+            rf'\b{ticker}\b[^<]*</[^>]+>[^<]*<[^>]+>\s*([\d]{{1,5}}\.\d{{1,4}})',
+            r'data-symbol-last[^>]*>\s*([\d]{1,5}\.\d{1,4})',
+            r'"regularMarketPrice"\s*:\s*([\d.]+)',
+        ):
+            m = re.search(pat, text)
+            if m:
+                v = _to_float(m.group(1))
+                if v and 0.01 < v < 100000:  # sanity
+                    price = v
+                    break
+        if not price:
+            return None
+        # Try to find prev close
+        prev = price
+        m = re.search(r'"previousClose"\s*:\s*([\d.]+)', text)
+        if m:
+            v = _to_float(m.group(1))
+            if v and 0.01 < v < 100000:
+                prev = v
+        return {
+            "ticker":     ticker,
+            "price":      price,
+            "prev_close": prev,
+            "change_pct": round((price - prev) / prev * 100, 3) if prev else 0,
+            "source":     "stockanalysis.com",
+        }
+    except Exception:
+        return None
+
+
+def _fetch_egx_one_from_mubasher(ticker: str) -> dict | None:
+    """Fallback — pull price from english.mubasher.info."""
+    try:
+        r = requests.get(
+            f"https://english.mubasher.info/markets/EGX/stocks/{ticker}",
+            headers=HEADERS, timeout=15,
+        )
+        if r.status_code != 200:
+            return None
+        text = r.text
+        # Mubasher renders e.g. "<span class='last'>123.45</span>" or similar
+        m = re.search(r'class=["\']last["\'][^>]*>\s*([\d.]+)\s*<', text)
+        if not m:
+            m = re.search(r'data-field=["\']last["\'][^>]*>\s*([\d.]+)', text)
+        if not m:
+            return None
+        price = _to_float(m.group(1))
+        if not price or price <= 0 or price > 100000:
+            return None
+        return {
+            "ticker":     ticker,
+            "price":      price,
+            "prev_close": price,
+            "change_pct": 0,
+            "source":     "mubasher.info",
+        }
+    except Exception:
+        return None
+
 
 def fetch_egx() -> list[dict]:
     out = []
-    for ticker, slug in EGX_SLUGS.items():
-        try:
-            r = requests.get(f"https://www.investing.com/equities/{slug}",
-                             headers=HEADERS, timeout=15)
-            if r.status_code != 200:
-                continue
-            m = re.search(
-                r"trading at a price of\s*([\d,.]+)\s*EGP.*?previous close of\s*([\d,.]+)\s*EGP",
-                r.text, re.S | re.I)
-            if not m:
-                continue
-            price = _to_float(m.group(1))
-            prev  = _to_float(m.group(2))
-            if not price or price <= 0:
-                continue
-            out.append({
-                "ticker":     ticker,
-                "price":      price,
-                "prev_close": prev or price,
-                "change_pct": round((price - prev) / prev * 100, 3) if prev else 0,
-                "source":     "investing.com",
-            })
-        except Exception:
-            traceback.print_exc()
-            continue
+    for tk in EGX_TICKERS:
+        row = _fetch_egx_one_from_stockanalysis(tk)
+        if not row:
+            row = _fetch_egx_one_from_mubasher(tk)
+        if row:
+            out.append(row)
     return out
 
 
