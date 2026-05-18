@@ -12,7 +12,7 @@
 
 ```
 thrivo-v10/
-├── Thrivo_v10.py              ← main app (Postgres-backed, public landing)
+├── Thrivo.py              ← main app (Postgres-backed, public landing)
 ├── db.py                      ← database layer (auto: Postgres or JSON)
 ├── pwa_support.py             ← iOS home-screen install
 ├── deploy.sh                  ← guided deploy script
@@ -147,7 +147,7 @@ git push -u origin main
 ## ✅ Step 3 — Deploy to Streamlit Cloud
 
 1. Go to **https://share.streamlit.io** → sign in with GitHub.
-2. Click **New app** → select repo `thrivo-app`, branch `main`, main file `Thrivo_v10.py`.
+2. Click **New app** → select repo `thrivo-app`, branch `main`, main file `Thrivo.py`.
 3. Click **Advanced settings**:
    - Python version: `3.11`
    - Add **Secrets** (paste this, replacing values):

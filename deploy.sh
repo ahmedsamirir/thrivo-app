@@ -24,9 +24,9 @@ print_warn() { echo -e "${Y}⚠ $1${N}"; }
 print_err()  { echo -e "${R}✗ $1${N}"; }
 
 # ── 0. Sanity ──
-if [ ! -f "Thrivo_v10.py" ]; then
-  print_err "Thrivo_v10.py not found in current directory."
-  echo    "  Run this script from the project root (where Thrivo_v10.py lives)."
+if [ ! -f "Thrivo.py" ]; then
+  print_err "Thrivo.py not found in current directory."
+  echo    "  Run this script from the project root (where Thrivo.py lives)."
   exit 1
 fi
 
@@ -124,7 +124,7 @@ print_step "Step 3 — Deploy"
 echo "Click ONE of the following to deploy:"
 echo
 echo -e "  ${G}Streamlit Cloud (recommended):${N}"
-echo    "    https://share.streamlit.io/deploy?repository=$GH_USER/$REPO_NAME&branch=main&mainModule=Thrivo_v10.py"
+echo    "    https://share.streamlit.io/deploy?repository=$GH_USER/$REPO_NAME&branch=main&mainModule=Thivo.py"
 echo
 echo -e "  ${G}Render:${N}"
 echo    "    https://dashboard.render.com/select-repo?type=web"
