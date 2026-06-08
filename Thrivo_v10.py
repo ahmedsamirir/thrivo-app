@@ -54,7 +54,7 @@ class AppConfig:
     NAME          = "Thrivo"
     TAGLINE       = "Grow with intention."
     ICON          = "🌱"
-    VERSION       = "v11.0"
+    VERSION       = "v12.0"
 
     # ── Storage ──
     DATA_FILE          = "thrivo_shared_data.json"   # legacy shared file (for migration)
@@ -420,7 +420,7 @@ ALL_TABS = [
     ("💳", "Credit Tracker",   "Credit"),
     ("🏋️", "Gym Tracker",      "Gym"),
     ("📈", "EGX Stocks",       "Stocks"),
-    ("🛒", "Smart Buying",     "BuyTime"),       # NEW v11 — Egyptian buying calendar (Pro+)
+    ("🛒", "Smart Buying",     "BuyTime"),       # NEW v10 — Egyptian buying calendar (Pro+)
     ("🎯", "Goal OS",          "GoalOS"),        # NEW — OKR-style goals
     ("✅", "Habit Tracker",    "Habits"),        # NEW — 21-day habit grid
     ("⏱️", "Focus Timer",      "Pomodoro"),      # NEW — pomodoro
@@ -751,7 +751,7 @@ def _render_public_prices_card():
 
 def _price_tile(title: str, value: str, sub: str, color: str):
     st.markdown(
-        f"""<div style='background:#0d1b2a;border:1px solid #1e3a5f;border-radius:12px;
+        f"""<div style='background:#0d1b2a;border:1px solid #334155;border-radius:12px;
             padding:14px 12px;text-align:center;margin-bottom:6px;'>
             <div style='color:#64748b;font-size:0.7rem;text-transform:uppercase;
                 letter-spacing:0.08em;'>{title}</div>
@@ -1074,7 +1074,7 @@ def render_admin_panel(users: dict):
         st.markdown(
             f"<div style='background:rgba(245,158,11,0.08);border-left:4px solid #f59e0b;"
             f"border-radius:8px;padding:12px 16px;margin-bottom:14px;'>"
-            f"<b style='color:#fbbf24;'>⚠️  Streamlit Cloud's filesystem is ephemeral.</b><br>"
+            f"<b style='color:#a78bfa;'>⚠️  Streamlit Cloud's filesystem is ephemeral.</b><br>"
             f"<span style='color:#cbd5e1;font-size:0.86rem;line-height:1.5;'>"
             f"Your data lives in JSON files on the server. Those files get wiped whenever the app "
             f"redeploys, sleeps and wakes, or its container restarts. To prevent data loss, you must "
@@ -1262,7 +1262,7 @@ def render_admin_panel(users: dict):
         plan_name_u = u.get("plan","Free")
         price_u = SUBSCRIPTION_PLANS.get(plan_name_u,{}).get("price",0)
         st.markdown(f"""
-        <div style='background:#0d1b2a; border:1px solid #1e3a5f; border-radius:10px; padding:16px; margin-bottom:12px;'>
+        <div style='background:#0d1b2a; border:1px solid #334155; border-radius:10px; padding:16px; margin-bottom:12px;'>
             <div style='color:#60a5fa; font-weight:700;'>{selected_user} <span style='font-size:0.8rem;color:#94a3b8;'>({status_badge})</span></div>
             <div style='color:#64748b; font-size:0.8rem;'>📧 {u.get("email","")}</div>
             <div style='color:#64748b; font-size:0.8rem;'>📅 Joined {u.get("created","")}</div>
@@ -1761,7 +1761,7 @@ def _get_default_user_data():
             "transactions": [], "installment_plans": [],
             "limits": {"QNB": 0, "EGBank": 0},        # legacy — kept for backward compat
             "balances": {"QNB": 0, "EGBank": 0},      # legacy — kept for backward compat
-            "accounts": []                             # v11.2+ — flexible: cards & installment programs
+            "accounts": []                             # v10.2+ — flexible: cards & installment programs
         },
         "gym": {"sessions": [], "workouts": [], "habits": []},
         "stocks": {"watchlist": [], "price_history": {}},
@@ -1779,7 +1779,7 @@ def _get_default_user_data():
         "habits":   {"list": [], "log": {}},                     # habits: [{id,name,icon,target_days,created}], log: {YYYY-MM-DD: [habit_id,...]}
         "pomodoro": {"sessions": [], "settings": {"focus_min": 25, "break_min": 5, "long_break_min": 15, "long_every": 4}},
         "okr":      {"objectives": [], "checkins": []},          # quarterly OKRs + weekly check-ins
-        "buytime":  {"watchlist": [], "savings_log": []},        # v11.1: planned purchases + savings tracker
+        "buytime":  {"watchlist": [], "savings_log": []},        # v10.1: planned purchases + savings tracker
         # ── v11: customizable daily protocol per user ──
         # Each item: {"id":"abc","emoji":"🧠","name":"Deep Work","time":"10:00 AM","block":"work"|"evening"}
         # Empty by default; users add their own via the Manage UI on Daily Tracker.
@@ -1803,7 +1803,7 @@ def load_user_data():
     # Patch credit sub-keys (legacy)
     if "limits"   not in d["credit"]: d["credit"]["limits"]   = {"QNB": 0, "EGBank": 0}
     if "balances" not in d["credit"]: d["credit"]["balances"] = {"QNB": 0, "EGBank": 0}
-    if "accounts" not in d["credit"]: d["credit"]["accounts"] = []   # v11.2+ — flexible accounts
+    if "accounts" not in d["credit"]: d["credit"]["accounts"] = []   # v10.2+ — flexible accounts
 
     # ── v11: migrate existing users to custom protocol_tasks ──
     # New users get an empty list (they'll be prompted to add tasks).
@@ -2008,7 +2008,7 @@ with st.sidebar:
         if total_sidebar > 0:
             pct = done_count / total_sidebar
             wcolor = ("#22c55e" if pct >= 0.99 else "#eab308" if pct >= 0.5 else
-                      "#1e3a5f" if done_count > 0 else "#0d1117")
+                      "#334155" if done_count > 0 else "#0d1117")
         else:
             wcolor = "#0d1117"
         day_letter = day_offset.strftime("%a")[0]
@@ -2280,7 +2280,7 @@ Be specific, inspiring, and concise. Format as a simple bulleted list."""
                         save_data(data); st.rerun()
                 with pi_col:
                     bc = "#052e16" if is_done else "#0d1b2a"
-                    bc2 = "#16a34a" if is_done else "#1e3a5f"
+                    bc2 = "#16a34a" if is_done else "#334155"
                     st.markdown(
                         f"<div style='background:{bc};border:1px solid {bc2};border-radius:8px;"
                         f"padding:6px 12px;margin-bottom:4px;display:flex;justify-content:space-between;'>"
@@ -2638,7 +2638,7 @@ Be specific, inspiring, and concise. Format as a simple bulleted list."""
             t = prayer_times.get(p, "")
             is_done = day_data["prayers"].get(p, False)
             bg = "#052e16" if is_done else "#0d1b2a"
-            border = "#16a34a" if is_done else "#1e3a5f"
+            border = "#16a34a" if is_done else "#334155"
 
             col_check, col_info = st.columns([1, 5])
             with col_check:
@@ -2722,7 +2722,7 @@ Be specific, inspiring, and concise. Format as a simple bulleted list."""
                 y=df_heat["Tasks"],
                 marker=dict(
                     color=df_heat["Tasks"],
-                    colorscale=[[0, "#0d1b2a"], [0.25, "#1e3a5f"], [0.6, "#1d4ed8"], [1.0, "#22c55e"]],
+                    colorscale=[[0, "#0d1b2a"], [0.25, "#334155"], [0.6, "#1d4ed8"], [1.0, "#22c55e"]],
                     cmin=0, cmax=4
                 )
             ))
@@ -3176,7 +3176,7 @@ elif st.session_state['page'] == 'Gold':
     for i, (asset, signal_type, message, color) in enumerate(signals_list):
         with sig_grid[i % 2]:
             st.markdown(f"""
-            <div style='background:#0d1b2a; border:1px solid #1e3a5f; border-left:3px solid {color};
+            <div style='background:#0d1b2a; border:1px solid #334155; border-left:3px solid {color};
                  border-radius:10px; padding:14px 16px; margin-bottom:10px;'>
                 <div style='display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;'>
                     <span style='color:#e2e8f0; font-weight:600; font-size:0.88rem;'>{asset}</span>
@@ -3284,14 +3284,23 @@ elif st.session_state['page'] == 'Finance':
         return amt
 
     inc_egp = sum(income_to_egp(x) for x in fin['income'])
+    # ── v12.1 fix: only count THIS month's extra expenses in the total. ──
+    # Extra expenses are dated and archived per-month. Previously the total
+    # summed every extra ever logged, so old months never "reset" out of the
+    # current total — it just grew forever. Now we filter by current month so
+    # when a new month starts, last month's extras roll into history and the
+    # current total starts fresh.
+    _cur_month = datetime.date.today().strftime("%Y-%m")
+    _extras_this_month = [x for x in fin['expenses_extra']
+                          if str(x.get("date", "")).startswith(_cur_month)]
     exp = sum(safe_float(x.get('amount')) for x in fin['expenses_monthly']) + \
-          sum(safe_float(x.get('amount')) for x in fin['expenses_extra'])
+          sum(safe_float(x.get('amount')) for x in _extras_this_month)
     assets = sum(safe_float(x.get('value')) for x in fin['assets'])
     savings_rate = ((inc_egp - exp) / inc_egp * 100) if inc_egp > 0 else 0
 
     # USD rate banner
     st.markdown(f"""
-    <div style='background:#0d1b2a; border:1px solid #1e3a5f; border-radius:10px; padding:10px 18px; margin-bottom:16px; display:flex; align-items:center; gap:12px;'>
+    <div style='background:#0d1b2a; border:1px solid #334155; border-radius:10px; padding:10px 18px; margin-bottom:16px; display:flex; align-items:center; gap:12px;'>
         <span style='color:#64748b; font-size:0.8rem;'>💱 Live USD Rate:</span>
         <span style='font-family:JetBrains Mono,monospace; color:#60a5fa; font-weight:700; font-size:1.1rem;'>{usd_rate:,.2f} EGP</span>
         <span style='color:#334155; font-size:0.75rem;'>— used to convert USD income automatically</span>
@@ -3306,13 +3315,13 @@ elif st.session_state['page'] == 'Finance':
     c4.metric("Savings Rate", f"{savings_rate:.1f}%")
 
     # Donut chart for expenses breakdown
-    if fin['expenses_monthly'] or fin['expenses_extra']:
+    if fin['expenses_monthly'] or _extras_this_month:
         st.divider()
         exp_col, bar_col = st.columns(2)
         with exp_col:
             st.subheader("💸 Expense Breakdown")
             all_exp = [(x.get('item', 'Fixed'), safe_float(x.get('amount'))) for x in fin['expenses_monthly']] + \
-                      [(x.get('item', 'Extra'), safe_float(x.get('amount'))) for x in fin['expenses_extra']]
+                      [(x.get('item', 'Extra'), safe_float(x.get('amount'))) for x in _extras_this_month]
             if all_exp:
                 labels, values = zip(*[(l, v) for l, v in all_exp if v > 0]) if any(v > 0 for _, v in all_exp) else ([], [])
                 if labels:
@@ -3463,7 +3472,7 @@ elif st.session_state['page'] == 'Finance':
                 f"<div style='color:#fb923c;font-family:JetBrains Mono,monospace;font-size:0.9rem;margin-top:4px;'>"
                 f"This month total: {month_total:,.0f} EGP</div>", unsafe_allow_html=True)
 
-        # ── Month-over-month health indicator + PNG export (v11.3+) ──
+        # ── Month-over-month health indicator + PNG export (v10.3+) ──
         # Compares THIS month's extras to LAST month's. Shows a colored health
         # banner and a button to download a styled PNG report of last month.
         st.markdown("---")
@@ -3543,115 +3552,187 @@ elif st.session_state['page'] == 'Finance':
                 cat_totals[cat] = cat_totals.get(cat, 0) + safe_float(e.get("amount", 0))
             cat_sorted = sorted(cat_totals.items(), key=lambda x: x[1], reverse=True)
 
-            # Quick summary preview
-            with st.expander(f"👀 Preview {last_month_label} breakdown", expanded=False):
-                preview_html = "<div style='display:grid;grid-template-columns:1fr 1fr;gap:6px;'>"
-                for cat, total in cat_sorted:
-                    pct = (total / last_month_total * 100) if last_month_total else 0
-                    preview_html += (f"<div style='display:flex;justify-content:space-between;"
-                                     f"background:var(--bg-surface);border:1px solid var(--border-2);"
-                                     f"border-radius:8px;padding:8px 12px;'>"
-                                     f"<span><b>{cat}</b></span>"
-                                     f"<span style='font-family:JetBrains Mono,monospace;'>"
-                                     f"{total:,.0f} EGP <span style='color:var(--text-dim);'>"
-                                     f"({pct:.0f}%)</span></span></div>")
-                preview_html += "</div>"
-                st.markdown(preview_html, unsafe_allow_html=True)
+            # Quick summary preview — itemized (v12.1)
+            with st.expander(f"👀 Preview {last_month_label} — every expense", expanded=False):
+                # Compact category chips first
+                st.markdown("<div style='color:var(--text-dim);font-size:0.74rem;"
+                            "text-transform:uppercase;letter-spacing:0.08em;margin-bottom:6px;'>"
+                            "By category</div>", unsafe_allow_html=True)
+                chip_html = "<div style='display:flex;flex-wrap:wrap;gap:6px;margin-bottom:14px;'>"
+                for cat, ctot in cat_sorted:
+                    pct = (ctot / last_month_total * 100) if last_month_total else 0
+                    chip_html += (f"<span style='background:var(--bg-surface);border:1px solid var(--border-2);"
+                                  f"border-radius:20px;padding:4px 12px;font-size:0.8rem;'>"
+                                  f"<b>{cat}</b> · {ctot:,.0f} "
+                                  f"<span style='color:var(--text-dim);'>({pct:.0f}%)</span></span>")
+                chip_html += "</div>"
+                st.markdown(chip_html, unsafe_allow_html=True)
 
-            # ── PNG generation ──
+                # Itemized table — every expense, sorted biggest first
+                st.markdown("<div style='color:var(--text-dim);font-size:0.74rem;"
+                            "text-transform:uppercase;letter-spacing:0.08em;margin-bottom:6px;'>"
+                            "Every expense</div>", unsafe_allow_html=True)
+                items_for_table = sorted(last_month_extras,
+                                         key=lambda e: safe_float(e.get("amount", 0)),
+                                         reverse=True)
+                table_df = pd.DataFrame([{
+                    "Date":     str(e.get("date", ""))[:10],
+                    "Item":     e.get("item", "—") or "—",
+                    "Category": e.get("category", "Other") or "Other",
+                    "Note (what / who)": e.get("notes", "") or "",
+                    "Amount (EGP)": safe_float(e.get("amount", 0)),
+                } for e in items_for_table])
+                st.dataframe(
+                    table_df,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "Amount (EGP)": st.column_config.NumberColumn("Amount (EGP)", format="%.0f"),
+                    },
+                )
+
+            # ── PNG generation (v12.1 — now itemized, not just categories) ──
             def _build_extras_png(month_label, extras_list, total, cat_breakdown,
                                   prev_total, prev_label, delta_pct, health_color_hex):
-                """Render a clean PNG report card for sharing."""
-                fig, axes = plt.subplots(2, 1, figsize=(8.5, 11),
-                                         gridspec_kw={'height_ratios': [1, 2.2]},
-                                         dpi=150)
+                """Render a detailed PNG report card: hero + category bars +
+                a full itemized table so the user sees every expense, what it
+                was for, and any note (who/why)."""
+                # Sort items by amount, biggest first
+                items_sorted = sorted(
+                    extras_list,
+                    key=lambda e: safe_float(e.get("amount", 0)),
+                    reverse=True,
+                )
+                n_items = len(items_sorted)
+                # Cap rows shown so the image stays readable; note overflow
+                MAX_ROWS = 28
+                shown = items_sorted[:MAX_ROWS]
+                overflow = n_items - len(shown)
+
+                # Dynamic figure height: taller when there are more items
+                table_height = 0.42 * len(shown) + 1.5
+                fig_h = 5.0 + table_height
+                fig = plt.figure(figsize=(8.5, fig_h), dpi=150)
                 fig.patch.set_facecolor("#0d1b2a")
 
-                # ── Top: hero header with totals ──
-                ax_h = axes[0]
+                # Layout: hero (top), category bars (middle), itemized table (bottom)
+                gs = fig.add_gridspec(3, 1, height_ratios=[1.5, 1.6, table_height / 2.2],
+                                      hspace=0.35)
+
+                # ══ HERO ══
+                ax_h = fig.add_subplot(gs[0])
                 ax_h.set_facecolor("#0d1b2a")
                 ax_h.axis("off")
                 ax_h.set_xlim(0, 10); ax_h.set_ylim(0, 10)
-
-                # Brand — text-only since matplotlib's DejaVu Sans lacks emoji glyphs
                 ax_h.text(0.3, 9.0, "THRIVO", fontsize=22, color="#22c55e",
                           fontweight="bold", family="sans-serif")
-                ax_h.text(0.3, 8.1, f"Extra Expenses Report — {month_label}",
+                ax_h.text(0.3, 7.7, f"Extra Expenses Report — {month_label}",
                           fontsize=14, color="#cbd5e1", family="sans-serif")
-
-                # Total
-                ax_h.text(0.3, 6.6, "TOTAL", fontsize=9, color="#64748b",
-                          family="sans-serif")
-                ax_h.text(0.3, 5.2, f"{total:,.0f}", fontsize=42, color="#e2e8f0",
+                ax_h.text(0.3, 5.6, "TOTAL", fontsize=9, color="#64748b", family="sans-serif")
+                ax_h.text(0.3, 3.6, f"{total:,.0f}", fontsize=38, color="#e2e8f0",
                           fontweight="bold", family="monospace")
-                ax_h.text(0.3, 4.0, "EGP", fontsize=14, color="#94a3b8", family="sans-serif")
-
-                # MoM box
+                ax_h.text(0.3, 2.1, "EGP", fontsize=13, color="#94a3b8", family="sans-serif")
                 if prev_total > 0:
-                    mom_txt = f"vs {prev_label}: {delta_pct:+.1f}%"
                     ax_h.add_patch(mpatches.FancyBboxPatch(
-                        (5.5, 4.0), 4.2, 1.2, boxstyle="round,pad=0.05,rounding_size=0.18",
-                        edgecolor=health_color_hex, facecolor=health_color_hex + "22",
-                        linewidth=2,
-                    ))
-                    ax_h.text(5.7, 4.85, mom_txt, fontsize=12, color=health_color_hex,
-                              fontweight="bold", family="monospace")
-                    ax_h.text(5.7, 4.35, f"{prev_label}: {prev_total:,.0f} EGP",
-                              fontsize=9, color="#94a3b8", family="sans-serif")
-
-                # Item count
-                ax_h.text(0.3, 2.6, f"{len(extras_list)} items", fontsize=11,
-                          color="#475569", family="sans-serif")
-                ax_h.text(0.3, 1.9, f"across {len(cat_breakdown)} categories",
+                        (5.5, 3.0), 4.2, 1.6, boxstyle="round,pad=0.05,rounding_size=0.18",
+                        edgecolor=health_color_hex, facecolor=health_color_hex + "22", linewidth=2))
+                    ax_h.text(5.7, 4.0, f"vs {prev_label}: {delta_pct:+.1f}%", fontsize=12,
+                              color=health_color_hex, fontweight="bold", family="monospace")
+                    ax_h.text(5.7, 3.35, f"{prev_label}: {prev_total:,.0f} EGP", fontsize=9,
+                              color="#94a3b8", family="sans-serif")
+                ax_h.text(0.3, 0.9, f"{n_items} expenses · {len(cat_breakdown)} categories",
                           fontsize=10, color="#475569", family="sans-serif")
 
-                # ── Bottom: horizontal bar chart of categories ──
-                ax_b = axes[1]
+                # ══ CATEGORY BARS ══
+                ax_b = fig.add_subplot(gs[1])
                 ax_b.set_facecolor("#0d1b2a")
-                cats_to_show = cat_breakdown[:10]
+                cats_to_show = cat_breakdown[:8]
                 cat_names  = [c[0] for c in cats_to_show]
                 cat_values = [c[1] for c in cats_to_show]
-
-                # Friendly category palette
                 palette = ["#22c55e", "#3b82f6", "#f59e0b", "#a855f7",
                            "#ec4899", "#14b8a6", "#ef4444", "#eab308",
                            "#06b6d4", "#8b5cf6"]
                 bar_colors = [palette[i % len(palette)] for i in range(len(cat_values))]
-
                 y_pos = np.arange(len(cat_names))
-                bars = ax_b.barh(y_pos, cat_values, color=bar_colors, edgecolor="none", height=0.65)
+                bars = ax_b.barh(y_pos, cat_values, color=bar_colors, edgecolor="none", height=0.62)
                 ax_b.set_yticks(y_pos)
-                ax_b.set_yticklabels(cat_names, fontsize=11, color="#e2e8f0")
+                ax_b.set_yticklabels(cat_names, fontsize=10, color="#e2e8f0")
                 ax_b.invert_yaxis()
-                ax_b.set_xlabel("EGP", color="#94a3b8", fontsize=10)
                 ax_b.tick_params(colors="#94a3b8")
-                ax_b.spines["top"].set_visible(False)
-                ax_b.spines["right"].set_visible(False)
-                ax_b.spines["bottom"].set_color("#334155")
-                ax_b.spines["left"].set_color("#334155")
+                for s in ("top", "right"):
+                    ax_b.spines[s].set_visible(False)
+                for s in ("bottom", "left"):
+                    ax_b.spines[s].set_color("#334155")
                 ax_b.grid(axis="x", color="#1e293b", linestyle="--", alpha=0.6)
                 ax_b.set_axisbelow(True)
-                ax_b.set_title(f"Breakdown by category — {month_label}",
-                               fontsize=13, color="#e2e8f0", pad=14, loc="left")
-
-                # Value labels on bars
+                ax_b.set_title("By category", fontsize=12, color="#e2e8f0", pad=8, loc="left")
                 max_v = max(cat_values) if cat_values else 1
                 for bar, val in zip(bars, cat_values):
                     pct = (val / total * 100) if total else 0
                     ax_b.text(bar.get_width() + max_v * 0.01,
                               bar.get_y() + bar.get_height() / 2,
-                              f"{val:,.0f} ({pct:.0f}%)",
-                              va="center", color="#cbd5e1", fontsize=10,
-                              family="monospace")
+                              f"{val:,.0f} ({pct:.0f}%)", va="center",
+                              color="#cbd5e1", fontsize=9, family="monospace")
+
+                # ══ ITEMIZED TABLE ══
+                ax_t = fig.add_subplot(gs[2])
+                ax_t.set_facecolor("#0d1b2a")
+                ax_t.axis("off")
+                ax_t.set_xlim(0, 100); ax_t.set_ylim(0, max(1, len(shown) + 2))
+
+                # Column x-positions (out of 100)
+                X_DATE, X_ITEM, X_CAT, X_NOTE, X_AMT = 1, 13, 44, 60, 99
+                top_y = len(shown) + 1
+
+                # Header row
+                ax_t.text(X_DATE, top_y, "DATE", fontsize=8, color="#64748b",
+                          fontweight="bold", family="sans-serif")
+                ax_t.text(X_ITEM, top_y, "ITEM", fontsize=8, color="#64748b",
+                          fontweight="bold", family="sans-serif")
+                ax_t.text(X_CAT, top_y, "CATEGORY", fontsize=8, color="#64748b",
+                          fontweight="bold", family="sans-serif")
+                ax_t.text(X_NOTE, top_y, "NOTE (what / who)", fontsize=8, color="#64748b",
+                          fontweight="bold", family="sans-serif")
+                ax_t.text(X_AMT, top_y, "AMOUNT", fontsize=8, color="#64748b",
+                          fontweight="bold", family="sans-serif", ha="right")
+                ax_t.plot([0, 100], [top_y - 0.4, top_y - 0.4], color="#334155", linewidth=0.8)
+
+                def _trunc(s, n):
+                    s = str(s or "")
+                    return s if len(s) <= n else s[:n - 1] + "…"
+
+                for i, e in enumerate(shown):
+                    row_y = top_y - 1 - i
+                    # Zebra striping
+                    if i % 2 == 0:
+                        ax_t.add_patch(mpatches.Rectangle(
+                            (0, row_y - 0.4), 100, 0.85,
+                            facecolor="#1e293b", edgecolor="none", zorder=0))
+                    date_str = str(e.get("date", ""))[:10]
+                    # Show just day if it's within the month
+                    day_part = date_str[-2:] if len(date_str) == 10 else date_str
+                    ax_t.text(X_DATE, row_y, day_part, fontsize=8.5, color="#94a3b8",
+                              family="monospace", va="center")
+                    ax_t.text(X_ITEM, row_y, _trunc(e.get("item", "—"), 22), fontsize=9,
+                              color="#e2e8f0", va="center")
+                    ax_t.text(X_CAT, row_y, _trunc(e.get("category", "Other"), 11),
+                              fontsize=8.5, color="#93c5fd", va="center")
+                    ax_t.text(X_NOTE, row_y, _trunc(e.get("notes", ""), 24), fontsize=8.5,
+                              color="#94a3b8", va="center", style="italic")
+                    ax_t.text(X_AMT, row_y, f"{safe_float(e.get('amount', 0)):,.0f}",
+                              fontsize=9, color="#22c55e", family="monospace",
+                              va="center", ha="right", fontweight="bold")
+
+                if overflow > 0:
+                    ax_t.text(50, 0.2, f"+ {overflow} more item{'s' if overflow != 1 else ''} not shown",
+                              fontsize=8, color="#64748b", ha="center", style="italic")
 
                 # Footer
-                fig.text(0.05, 0.015,
+                fig.text(0.05, 0.012,
                          f"Generated {datetime.date.today().strftime('%Y-%m-%d')} · Thrivo Finance",
                          fontsize=8, color="#475569")
-                fig.text(0.95, 0.015, "thrivo.app", fontsize=8, color="#475569",
-                         ha="right")
+                fig.text(0.95, 0.012, "thrivo.app", fontsize=8, color="#475569", ha="right")
 
-                plt.tight_layout(rect=[0, 0.03, 1, 1])
                 buf = io.BytesIO()
                 plt.savefig(buf, format="png", facecolor="#0d1b2a",
                             edgecolor="none", bbox_inches="tight", dpi=150)
@@ -3825,7 +3906,7 @@ elif st.session_state['page'] == 'Credit':
     today_dt = datetime.date.today()
     current_month_str = today_dt.strftime("%Y-%m")
 
-    # ── My Accounts (v11.2+) — flexible card / installment-program manager ──
+    # ── My Accounts (v10.2+) — flexible card / installment-program manager ──
     accounts = credit.setdefault("accounts", [])
 
     # Catalog of common providers — pre-populated for convenience
@@ -3846,7 +3927,7 @@ elif st.session_state['page'] == 'Credit':
         "Halan":         {"kind": "installment_app", "color": "#ef4444", "default_apr": 28.0, "min_pmt_pct": 0},
         "MidTakseet":    {"kind": "installment_app", "color": "#14b8a6", "default_apr": 24.0, "min_pmt_pct": 0},
         "Sympl":         {"kind": "installment_app", "color": "#ec4899", "default_apr": 0,    "min_pmt_pct": 0},
-        "Khazna":        {"kind": "installment_app", "color": "#6366f1", "default_apr": 25.0, "min_pmt_pct": 0},
+        "Khazna":        {"kind": "installment_app", "color": "#3b82f6", "default_apr": 25.0, "min_pmt_pct": 0},
         "aman":          {"kind": "installment_app", "color": "#64748b", "default_apr": 24.0, "min_pmt_pct": 0},
         "Other / Custom":{"kind": "credit_card",   "color": "#475569", "default_apr": 50.0,  "min_pmt_pct": 5},
     }
@@ -4087,8 +4168,35 @@ elif st.session_state['page'] == 'Credit':
                                                     min_value=0, max_value=28, step=1, value=0,
                                                     help="Day of month payment is due. Set 0 if not applicable.")
 
+                # ── v12: richer card details ──
+                c7, c8, c9 = st.columns([1, 1, 1])
+                with c7:
+                    network_input = st.selectbox(
+                        "Card network",
+                        options=["—", "Visa", "Mastercard", "Meeza", "American Express"],
+                        help="The payment network printed on the card",
+                    )
+                with c8:
+                    last4_input = st.text_input("Last 4 digits", max_chars=4,
+                                                placeholder="1234",
+                                                help="For your reference only — helps tell cards apart")
+                with c9:
+                    statement_day_input = st.number_input("Statement closing day (1-28)",
+                                                          min_value=0, max_value=28, step=1, value=0,
+                                                          help="Day the statement is generated each month")
+
+                c10, c11 = st.columns([1, 1])
+                with c10:
+                    annual_fee_input = st.number_input("Annual fee (EGP)",
+                                                       min_value=0.0, step=50.0, value=0.0,
+                                                       help="Yearly card fee, if any")
+                with c11:
+                    rewards_input = st.number_input("Rewards / cashback (%)",
+                                                    min_value=0.0, max_value=20.0, step=0.5, value=0.0,
+                                                    help="Cashback or points rate, if any")
+
                 notes_input = st.text_input("Notes (optional)",
-                                            placeholder="e.g. 'Cashback 1%, no FX fee, expires 12/2027'")
+                                            placeholder="e.g. 'No FX fee, airport lounge, expires 12/2027'")
 
                 submitted = st.form_submit_button("➕ Add Account", type="primary",
                                                   use_container_width=True)
@@ -4111,6 +4219,13 @@ elif st.session_state['page'] == 'Credit':
                             "apr":           float(apr_input),
                             "min_pmt_pct":   float(min_pmt_input),
                             "due_day":       int(due_day_input) if due_day_input else None,
+                            # ── v12 enriched fields ──
+                            "network":       network_input if network_input != "—" else "",
+                            "last4":         last4_input.strip(),
+                            "statement_day": int(statement_day_input) if statement_day_input else None,
+                            "annual_fee":    float(annual_fee_input),
+                            "rewards_pct":   float(rewards_input),
+                            "transactions":  [],   # per-account transaction log
                             "notes":         notes_input.strip(),
                             "color":         preset["color"],
                             "added_on":      today_dt.isoformat(),
@@ -4146,14 +4261,26 @@ elif st.session_state['page'] == 'Credit':
                     display_name = acc["provider"]
                     if acc.get("nickname"):
                         display_name += f" · {acc['nickname']}"
+                    # v12: card network + last4 chip
+                    card_chip = ""
+                    if acc.get("network") or acc.get("last4"):
+                        net = acc.get("network", "")
+                        l4  = f"•••• {acc['last4']}" if acc.get("last4") else ""
+                        card_chip = (f"<span style='color:var(--text-dim);font-size:0.72rem;'>"
+                                     f"{net} {l4}</span><br>")
+                    rewards_chip = ""
+                    if acc.get("rewards_pct"):
+                        rewards_chip = f" · {acc['rewards_pct']:.1f}% rewards"
                     st.markdown(
                         f"<div style='background:var(--bg-surface);border:1px solid var(--border-2);"
                         f"border-left:4px solid {acc.get('color', '#475569')};border-radius:10px;"
                         f"padding:10px 14px;'>"
                         f"<b>{display_name}</b><br>"
+                        f"{card_chip}"
                         f"<span style='color:var(--text-muted);font-size:0.78rem;'>"
                         f"{kind_label} · APR {acc.get('apr', 0):.1f}%"
                         f"{' · Due day ' + str(acc['due_day']) if acc.get('due_day') else ''}"
+                        f"{rewards_chip}"
                         f"</span></div>",
                         unsafe_allow_html=True,
                     )
@@ -4187,12 +4314,115 @@ elif st.session_state['page'] == 'Credit':
                         save_data(data)
                         st.rerun()
 
-                # Quick balance update inline
-                with st.expander(f"  ↳ Update balance for {acc['provider']}", expanded=False):
+                # ── v12: rich per-account detail panel ──
+                with st.expander(f"  ↳ Details, transactions & tools — {acc['provider']}", expanded=False):
+                    acc_currency = acc.get("currency", "EGP")
+
+                    # Card facts row
+                    fact_bits = []
+                    if acc.get("statement_day"):
+                        fact_bits.append(f"📅 Statement closes day {acc['statement_day']}")
+                    if acc.get("due_day"):
+                        fact_bits.append(f"💸 Payment due day {acc['due_day']}")
+                    if acc.get("annual_fee"):
+                        fact_bits.append(f"🏷️ Annual fee {acc['annual_fee']:,.0f} {acc_currency}")
+                    if acc.get("min_pmt_pct"):
+                        fact_bits.append(f"📉 Min payment {acc['min_pmt_pct']:.0f}%")
+                    if fact_bits:
+                        st.markdown(
+                            "<div style='color:var(--text-muted);font-size:0.82rem;margin-bottom:10px;'>"
+                            + "  ·  ".join(fact_bits) + "</div>",
+                            unsafe_allow_html=True,
+                        )
+                    if acc.get("notes"):
+                        st.caption(f"📝 {acc['notes']}")
+
+                    # Smart payoff estimate (feeds #3 — decision help)
+                    if acc_bal > 0 and acc.get("apr", 0) > 0:
+                        monthly_rate = acc["apr"] / 100 / 12
+                        min_pmt = max(acc_bal * (acc.get("min_pmt_pct", 5) / 100), 50)
+                        # Months to pay off if paying the minimum (capped simulation)
+                        bal_sim, months, total_interest = acc_bal, 0, 0.0
+                        while bal_sim > 1 and months < 600:
+                            interest = bal_sim * monthly_rate
+                            total_interest += interest
+                            pmt = max(min_pmt, bal_sim * (acc.get("min_pmt_pct", 5) / 100))
+                            bal_sim = bal_sim + interest - pmt
+                            months += 1
+                            if pmt <= interest:  # never pays off
+                                months = -1
+                                break
+                        st.markdown(
+                            f"<div style='background:var(--fill-warn);border:1px solid var(--warn);"
+                            f"border-radius:8px;padding:10px 14px;margin:8px 0;font-size:0.84rem;'>"
+                            f"<b style='color:var(--warn-soft);'>⚠️ Payoff estimate (minimum payments)</b><br>"
+                            + (f"<span style='color:var(--text-muted);'>Paying only the minimum, this never gets paid off "
+                               f"because interest exceeds the payment. Pay more than {acc['apr']/12:.1f}% monthly.</span>"
+                               if months == -1 else
+                               f"<span style='color:var(--text-muted);'>≈ <b>{months} months</b> "
+                               f"({months//12}y {months%12}m), costing ≈ <b>{total_interest:,.0f} {acc_currency}</b> in interest. "
+                               f"Pay more than the minimum to cut this sharply.</span>")
+                            + f"</div>",
+                            unsafe_allow_html=True,
+                        )
+
+                    # Transaction logging
+                    acc.setdefault("transactions", [])
+                    st.markdown("**Recent transactions**")
+                    txns = acc["transactions"][-5:][::-1]
+                    if txns:
+                        for tx in txns:
+                            sign = "−" if tx["type"] == "charge" else "+"
+                            tcolor = "var(--danger)" if tx["type"] == "charge" else "var(--accent)"
+                            st.markdown(
+                                f"<div style='display:flex;justify-content:space-between;"
+                                f"padding:4px 0;border-bottom:1px solid var(--border-soft);font-size:0.82rem;'>"
+                                f"<span style='color:var(--text-muted);'>{tx['date']} · {tx.get('desc','—')}</span>"
+                                f"<span style='color:{tcolor};font-family:JetBrains Mono,monospace;'>"
+                                f"{sign}{tx['amount']:,.0f}</span></div>",
+                                unsafe_allow_html=True,
+                            )
+                    else:
+                        st.caption("No transactions logged yet.")
+
+                    with st.form(f"acc_txn_{acc['id']}", clear_on_submit=True):
+                        tc1, tc2, tc3, tc4 = st.columns([1.2, 2, 1.4, 1])
+                        with tc1:
+                            tx_type = st.selectbox("Type", ["charge", "payment"],
+                                                   format_func=lambda x: "💳 Charge" if x == "charge" else "💵 Payment",
+                                                   label_visibility="collapsed", key=f"txt_{acc['id']}")
+                        with tc2:
+                            tx_desc = st.text_input("Desc", placeholder="e.g. Groceries / Salary payment",
+                                                    label_visibility="collapsed", key=f"txd_{acc['id']}")
+                        with tc3:
+                            tx_amt = st.number_input("Amount", min_value=0.0, step=50.0,
+                                                     label_visibility="collapsed", key=f"txa_{acc['id']}")
+                        with tc4:
+                            tx_submit = st.form_submit_button("Add", use_container_width=True)
+                        if tx_submit and tx_amt > 0:
+                            for a in accounts:
+                                if a["id"] == acc["id"]:
+                                    a.setdefault("transactions", []).append({
+                                        "date":   datetime.date.today().isoformat(),
+                                        "type":   tx_type,
+                                        "desc":   tx_desc.strip() or ("Charge" if tx_type == "charge" else "Payment"),
+                                        "amount": float(tx_amt),
+                                    })
+                                    # Auto-adjust balance
+                                    if tx_type == "charge":
+                                        a["balance"] = float(a.get("balance", 0)) + float(tx_amt)
+                                    else:
+                                        a["balance"] = max(0, float(a.get("balance", 0)) - float(tx_amt))
+                                    break
+                            save_data(data)
+                            st.rerun()
+
+                    # Manual balance override
+                    st.markdown("---")
                     upd_c1, upd_c2 = st.columns([3, 1])
                     with upd_c1:
                         new_bal = st.number_input(
-                            "New current balance",
+                            "Manually set current balance",
                             min_value=0.0, step=100.0,
                             value=float(acc.get("balance", 0)),
                             key=f"acc_balupd_{acc['id']}",
@@ -4478,7 +4708,7 @@ elif st.session_state['page'] == 'Credit':
                 if name and total_months > 0:
                     status_c = "#22c55e" if remaining == 0 else bcolor
                     st.markdown(f"""
-                    <div style='background:#0d1b2a; border:1px solid #1e3a5f; border-radius:12px; padding:14px 18px; margin-bottom:10px;'>
+                    <div style='background:#0d1b2a; border:1px solid #334155; border-radius:12px; padding:14px 18px; margin-bottom:10px;'>
                         <div style='display:flex; justify-content:space-between; margin-bottom:8px;'>
                             <span style='color:#e2e8f0; font-weight:600;'>📦 {name}</span>
                             <span style='background:{bcolor}22; color:{bcolor}; border-radius:999px; padding:2px 10px; font-size:0.75rem;'>{bname}</span>
@@ -4514,7 +4744,7 @@ elif st.session_state['page'] == 'Credit':
             total      = revolving + interest + install
             min_p      = bdata["min_pmt"] if bname != "Combined" else qnb["min_pmt"] + egbnk["min_pmt"]
             st.markdown(f"""
-            <div style='background:#0d1b2a; border:1px solid #1e3a5f; border-radius:16px; padding:22px; margin-bottom:14px;'>
+            <div style='background:#0d1b2a; border:1px solid #334155; border-radius:16px; padding:22px; margin-bottom:14px;'>
                 <div style='color:#60a5fa; font-size:0.78rem; letter-spacing:0.1em; text-transform:uppercase; margin-bottom:14px;'>
                     💳 {bname} Statement — {today_dt.strftime('%B %Y')}
                 </div>
@@ -4583,7 +4813,7 @@ elif st.session_state['page'] == 'Credit':
 
         with cc2:
             st.markdown(f"""
-            <div style='background:#0d1b2a; border:1px solid #1e3a5f; border-radius:14px; padding:20px; margin-top:24px;'>
+            <div style='background:#0d1b2a; border:1px solid #334155; border-radius:14px; padding:20px; margin-top:24px;'>
                 <div style='color:#60a5fa; font-size:0.78rem; letter-spacing:0.1em; text-transform:uppercase; margin-bottom:12px;'>{calc_bank_sel} Calculation</div>
                 <div style='font-family:JetBrains Mono,monospace; font-size:2rem; font-weight:700; color:#22c55e; margin-bottom:12px;'>{monthly_pmt:,.2f} EGP/mo</div>
                 <div style='display:grid; grid-template-columns:1fr 1fr; gap:8px; font-size:0.82rem;'>
@@ -4871,7 +5101,7 @@ Include warm-up first and cool-down/stretches at end. Aim for {ai_duration} minu
                     w = ex.get('weight_kg', 0)
                     weight_str = f"{w} kg" if w and float(w) > 0 else "Bodyweight"
                     st.markdown(f"""
-                    <div style='background:#0d1b2a; border:1px solid #1e3a5f; border-radius:8px;
+                    <div style='background:#0d1b2a; border:1px solid #334155; border-radius:8px;
                          padding:10px 14px; margin-bottom:6px; display:flex; justify-content:space-between; align-items:center;'>
                         <div>
                             <span style='color:#e2e8f0; font-weight:600; font-size:0.9rem;'>{ex.get('exercise','')}</span>
@@ -5801,7 +6031,7 @@ elif st.session_state['page'] == 'Business':
             margin_c = "#22c55e" if bcalc["margin"] > 20 else "#facc15" if bcalc["margin"] > 5 else "#ef4444"
             status = "🟢 Healthy" if bcalc["margin"] > 20 else "🟡 Watch" if bcalc["margin"] > 5 else "🔴 Loss Risk"
             st.markdown(f"""
-            <div style='background:#0d1b2a; border:1px solid #1e3a5f; border-radius:10px; padding:14px 18px; margin-bottom:8px; display:flex; justify-content:space-between; align-items:center;'>
+            <div style='background:#0d1b2a; border:1px solid #334155; border-radius:10px; padding:14px 18px; margin-bottom:8px; display:flex; justify-content:space-between; align-items:center;'>
                 <div><span style='color:#e2e8f0; font-weight:600;'>{bname}</span>
                      <span style='margin-left:10px; color:{margin_c}; font-size:0.85rem;'>{status}</span></div>
                 <div style='display:flex; gap:24px; font-family:JetBrains Mono,monospace; font-size:0.9rem;'>
@@ -6047,7 +6277,7 @@ elif st.session_state['page'] == 'Agile':
         status_groups[s] = [t for t in tasks if t.get("status","") == s]
 
     kanban_cols = st.columns(len(STATUSES))
-    status_colors = {"🆕 New":"#1e3a5f","🔄 In Progress":"#1c3a1c","🔍 In Review":"#3a2a00",
+    status_colors = {"🆕 New":"#334155","🔄 In Progress":"#1c3a1c","🔍 In Review":"#3a2a00",
                      "🧪 Testing":"#1a1a4a","✅ Done":"#0a2a1a","❌ Blocked":"#4a1a1a"}
     for idx, status in enumerate(STATUSES):
         with kanban_cols[idx]:
@@ -6058,10 +6288,10 @@ elif st.session_state['page'] == 'Agile':
                 pri_colors = {"🔴 Critical":"#ef4444","🟠 High":"#fb923c","🟡 Medium":"#facc15","🟢 Low":"#22c55e"}
                 pc = pri_colors.get(t.get("priority","🟢 Low"), "#475569")
                 st.markdown(f"""
-                <div style='background:#0d1b2a; border:1px solid #1e3a5f; border-left:3px solid {pc}; border-radius:8px; padding:10px; margin-bottom:6px;'>
+                <div style='background:#0d1b2a; border:1px solid #334155; border-left:3px solid {pc}; border-radius:8px; padding:10px; margin-bottom:6px;'>
                     <div style='color:#e2e8f0; font-size:0.82rem; font-weight:600; margin-bottom:4px;'>{t.get("title","")}</div>
                     <div style='display:flex; gap:6px; flex-wrap:wrap;'>
-                        <span style='background:#1e3a5f; color:#93c5fd; border-radius:4px; padding:1px 6px; font-size:0.65rem;'>{t.get("tag","")}</span>
+                        <span style='background:#334155; color:#60a5fa; border-radius:4px; padding:1px 6px; font-size:0.65rem;'>{t.get("tag","")}</span>
                         <span style='color:#475569; font-size:0.65rem;'>SP:{t.get("story_points",1)}</span>
                     </div>
                 </div>
@@ -6173,7 +6403,7 @@ elif st.session_state['page'] == 'Agile':
                 total_sp = len(sp.get("tasks",[]))
                 pct_sp = (done_sp / total_sp * 100) if total_sp > 0 else 0
                 st.markdown(f"""
-                <div style='background:#0d1b2a; border:1px solid #1e3a5f; border-radius:10px; padding:12px 16px; margin-bottom:8px;'>
+                <div style='background:#0d1b2a; border:1px solid #334155; border-radius:10px; padding:12px 16px; margin-bottom:8px;'>
                     <div style='display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;'>
                         <span style='color:#e2e8f0; font-weight:600;'>{sp.get("name","")}</span>
                         <span style='color:#60a5fa; font-size:0.8rem; font-family:JetBrains Mono,monospace;'>{done_sp}/{total_sp} tasks · {pct_sp:.0f}%</span>
@@ -6223,9 +6453,11 @@ elif st.session_state['page'] == 'AIAdviser':
             curr = item.get("currency","EGP")
             monthly_income_egp += amt * usd_rate if curr == "USD" else amt
 
-        # Expenses
+        # Expenses — only count THIS month's extras (v12.1), same as Finance Hub
         fixed_exp = sum(safe_float(e.get("amount",0)) for e in fin.get("expenses_monthly",[]))
-        extra_exp = sum(safe_float(e.get("amount",0)) for e in fin.get("expenses_extra",[]))
+        _cur_month_snap = datetime.date.today().strftime("%Y-%m")
+        extra_exp = sum(safe_float(e.get("amount",0)) for e in fin.get("expenses_extra",[])
+                        if str(e.get("date","")).startswith(_cur_month_snap))
         total_expenses = fixed_exp + extra_exp
         monthly_savings = monthly_income_egp - total_expenses
         savings_rate = (monthly_savings / monthly_income_egp * 100) if monthly_income_egp > 0 else 0
@@ -6332,7 +6564,7 @@ elif st.session_state['page'] == 'AIAdviser':
             role_icon = "🧑" if msg["role"] == "user" else "🤖"
             bg = "#0d1b2a" if msg["role"] == "assistant" else "#111827"
             st.markdown(f"""
-            <div style='background:{bg}; border:1px solid #1e3a5f; border-radius:10px; padding:12px 16px; margin-bottom:8px;'>
+            <div style='background:{bg}; border:1px solid #334155; border-radius:10px; padding:12px 16px; margin-bottom:8px;'>
                 <div style='color:#60a5fa; font-size:0.75rem; margin-bottom:4px;'>{role_icon} {"AI Adviser" if msg["role"]=="assistant" else "You"}</div>
                 <div style='color:#e2e8f0; font-size:0.88rem; white-space:pre-wrap;'>{msg["content"]}</div>
             </div>
@@ -6414,7 +6646,7 @@ Be specific with EGP numbers. Focus on the person's actual financial situation."
             with st.spinner("🤖 Analysing your purchase..."):
                 analysis = call_claude(full_prompt, max_tokens=1500)
             st.markdown(f"""
-            <div style='background:#0d1b2a; border:1px solid #1e3a5f; border-radius:12px; padding:20px; margin-top:12px;'>
+            <div style='background:#0d1b2a; border:1px solid #334155; border-radius:12px; padding:20px; margin-top:12px;'>
                 <div style='color:#60a5fa; font-size:0.8rem; margin-bottom:10px;'>🤖 AI Analysis — {purchase_item}</div>
                 <div style='color:#e2e8f0; font-size:0.88rem; white-space:pre-wrap; line-height:1.7;'>{analysis}</div>
             </div>""", unsafe_allow_html=True)
@@ -6465,7 +6697,7 @@ Be direct, honest, and protect the user's financial interests."""
             with st.spinner("🤖 Evaluating the offer..."):
                 verdict = call_claude(full_prompt, max_tokens=1200)
             st.markdown(f"""
-            <div style='background:#0d1b2a; border:1px solid #1e3a5f; border-radius:12px; padding:20px; margin-top:12px;'>
+            <div style='background:#0d1b2a; border:1px solid #334155; border-radius:12px; padding:20px; margin-top:12px;'>
                 <div style='color:#a78bfa; font-size:0.8rem; margin-bottom:10px;'>🏦 Offer Verdict — {offer_bank} {offer_type}</div>
                 <div style='color:#e2e8f0; font-size:0.88rem; white-space:pre-wrap; line-height:1.7;'>{verdict}</div>
             </div>""", unsafe_allow_html=True)
@@ -6629,7 +6861,7 @@ elif st.session_state['page'] == 'Streaks':
                 btn_color = habit.get("color", "#3b82f6")
                 emoji = habit.get("emoji", "🎯")
                 st.markdown(f"""
-                <div style='background:{"#052e16" if is_done else "#0d1b2a"}; border:2px solid {btn_color if is_done else "#1e3a5f"};
+                <div style='background:{"#052e16" if is_done else "#0d1b2a"}; border:2px solid {btn_color if is_done else "#334155"};
                      border-radius:14px; padding:16px; text-align:center; margin-bottom:8px;'>
                     <div style='font-size:2rem;'>{emoji}</div>
                     <div style='color:#e2e8f0; font-weight:600; font-size:0.88rem; margin:4px 0;'>{habit["name"]}</div>
@@ -6695,7 +6927,7 @@ elif st.session_state['page'] == 'Streaks':
             medal = ["🥇","🥈","🥉"][rank] if rank < 3 else f"#{rank+1}"
             c = "#22c55e" if "Done" in row["Status"] else "#475569"
             st.markdown(
-                f"<div style='background:#0d1b2a; border:1px solid #1e3a5f; border-radius:10px; "
+                f"<div style='background:#0d1b2a; border:1px solid #334155; border-radius:10px; "
                 f"padding:12px 16px; margin-bottom:6px; display:flex; justify-content:space-between; align-items:center;'>"
                 f"<div><span style='font-size:1.1rem;'>{medal}</span>"
                 f"<span style='color:#e2e8f0; font-weight:600; font-size:0.9rem; margin-left:8px;'>{row['Habit']}</span></div>"
@@ -6759,7 +6991,7 @@ elif st.session_state['page'] == 'Chef':
                         unsafe_allow_html=True)
                 else:
                     st.markdown(
-                        f"<div style='background:#0d1b2a;border:1px solid #1e3a5f;border-radius:10px;"
+                        f"<div style='background:#0d1b2a;border:1px solid #334155;border-radius:10px;"
                         f"padding:12px 16px;margin-bottom:8px;display:flex;justify-content:space-between;align-items:center;'>"
                         f"<div><span style='font-size:1.1rem;'>{icon}</span>"
                         f"<span style='color:#64748b;margin-left:8px;'>{slot} — not logged yet</span></div>"
@@ -6771,7 +7003,7 @@ elif st.session_state['page'] == 'Chef':
             total_prot = sum(sf(m.get("protein_g",0)) for m in today_log)
             total_carb = sum(sf(m.get("carbs_g",0)) for m in today_log)
             st.markdown(f"""
-            <div style='background:#0d1b2a;border:1px solid #1e3a5f;border-radius:12px;padding:16px;'>
+            <div style='background:#0d1b2a;border:1px solid #334155;border-radius:12px;padding:16px;'>
                 <div style='color:#60a5fa;font-size:0.8rem;font-weight:600;margin-bottom:10px;'>📊 Today's Nutrition</div>
                 <div style='font-family:JetBrains Mono,monospace;'>
                     <div style='display:flex;justify-content:space-between;margin-bottom:6px;'>
@@ -7143,7 +7375,7 @@ Keep it engaging, practical, and appropriate for {level} level."""
                 idx = st.session_state["fc_idx"] % len(vocab)
                 card = vocab[idx]
                 flip_color = "#052e16" if st.session_state["fc_show"] else "#0d1b2a"
-                flip_border = "#22c55e" if st.session_state["fc_show"] else "#1e3a5f"
+                flip_border = "#22c55e" if st.session_state["fc_show"] else "#334155"
                 st.markdown(
                     f"<div style='background:{flip_color};border:2px solid {flip_border};"
                     f"border-radius:14px;padding:24px;text-align:center;min-height:140px;'>"
@@ -7428,7 +7660,7 @@ elif st.session_state['page'] == 'Notes':
             )
             total_p = max(1, len(data.get("protocol_tasks", []) or []))
             st.markdown(f"""
-            <div style='background:#0d1b2a; border:1px solid #1e3a5f; border-radius:12px; padding:16px 20px; margin-bottom:12px;'>
+            <div style='background:#0d1b2a; border:1px solid #334155; border-radius:12px; padding:16px 20px; margin-bottom:12px;'>
                 <div style='display:flex; justify-content:space-between; margin-bottom:8px;'>
                     <span style='color:#60a5fa; font-weight:600; font-size:0.95rem;'>{d_obj.strftime('%A, %b %d')}</span>
                     <span style='color:#475569; font-size:0.8rem; font-family:JetBrains Mono,monospace;'>{tasks_done}/{total_p} tasks</span>
@@ -7466,8 +7698,7 @@ elif st.session_state['page'] == 'Reports':
         st.subheader(f"Report for {selected_date.strftime('%B %d, %Y')}")
 
         def gen_report():
-            # ── Brighter, friendlier palette ──
-            # Soft warm gradient background, vibrant accent colors per metric.
+            # ── Midnight & Amber report palette — warm near-black gradient ──
             BG_TOP    = "#1e293b"
             BG_BOT    = "#0f172a"
             CARD_BG   = "#1e2740"
@@ -8304,7 +8535,7 @@ elif st.session_state['page'] == 'GoalOS':
         st.markdown("---")
         st.subheader("➕ New Objective")
         with st.form("new_obj_form", clear_on_submit=True):
-            new_title = st.text_input("Objective *", placeholder="e.g. Launch Thrivo v11 to paying customers")
+            new_title = st.text_input("Objective *", placeholder="e.g. Launch Thrivo v10 to paying customers")
             new_why = st.text_area("Why it matters", placeholder="The deeper reason behind this goal...", height=60)
             st.markdown("**Key Results** (how you'll measure success — add 2-5)")
 
@@ -8703,6 +8934,219 @@ elif st.session_state['page'] == 'FinanceDash':
                 unsafe_allow_html=True,
             )
 
+    # ════════════════════════════════════════════════════════════════
+    #  v12 — SMART DECISIONS  (financial decision-support)
+    # ════════════════════════════════════════════════════════════════
+    st.markdown("---")
+    st.markdown("### 🧠 Smart Decisions")
+    st.caption("Personalized, plain-language guidance based on your numbers. Not financial advice — a starting point for your own decisions.")
+
+    # ── Guard: not enough data for a meaningful score ──
+    has_financial_data = (
+        total_cash_assets > 0 or total_monthly_income > 0 or
+        total_credit_used > 0 or total_stock_value > 0 or total_monthly_exp > 0
+    )
+    if not has_financial_data:
+        st.markdown(
+            "<div style='background:var(--bg-surface);border:1px dashed var(--info);"
+            "border-radius:14px;padding:28px 22px;text-align:center;'>"
+            "<div style='font-size:2.2rem;margin-bottom:8px;'>🧭</div>"
+            "<div style='color:var(--text-heading);font-weight:700;font-size:1.05rem;margin-bottom:6px;'>"
+            "Add your financial data to unlock Smart Decisions</div>"
+            "<div style='color:var(--text-muted);font-size:0.88rem;line-height:1.5;max-width:480px;margin:0 auto;'>"
+            "Once you add income, expenses, cash assets, or credit cards, this section will compute "
+            "your Financial Health Score and give you personalized, prioritized guidance on what to "
+            "focus on next.</div>"
+            "</div>",
+            unsafe_allow_html=True,
+        )
+        # Quick links still useful
+        st.markdown("---")
+        st.markdown("#### 🔗 Jump to details")
+        jl1, jl2, jl3, jl4 = st.columns(4)
+        with jl1:
+            if st.button("💸 Finance Hub", use_container_width=True, key="empty_jl1"):
+                st.session_state["page"] = "Finance"; st.rerun()
+        with jl2:
+            if st.button("💳 Credit Tracker", use_container_width=True, key="empty_jl2"):
+                st.session_state["page"] = "Credit"; st.rerun()
+        with jl3:
+            if st.button("📈 EGX Stocks", use_container_width=True, key="empty_jl3"):
+                st.session_state["page"] = "Stocks"; st.rerun()
+        with jl4:
+            if st.button("💰 Gold & Dollar", use_container_width=True, key="empty_jl4"):
+                st.session_state["page"] = "Gold"; st.rerun()
+        st.stop()
+
+    # ── Financial Health Score (0–100) ──
+    # Four weighted components: emergency runway, credit utilization,
+    # savings rate, and debt-to-asset ratio.
+    score = 0
+    score_breakdown = []
+
+    # 1. Emergency fund runway (max 30 pts) — months of expenses covered by cash
+    monthly_burn = total_monthly_exp if total_monthly_exp > 0 else 1
+    runway_months = total_cash_assets / monthly_burn if monthly_burn > 0 else 0
+    if runway_months >= 6:
+        runway_pts = 30
+    elif runway_months >= 3:
+        runway_pts = 20
+    elif runway_months >= 1:
+        runway_pts = 10
+    else:
+        runway_pts = 0
+    score += runway_pts
+    score_breakdown.append(("Emergency runway", runway_pts, 30,
+                            f"{runway_months:.1f} months of expenses in cash"))
+
+    # 2. Credit utilization (max 25 pts)
+    if total_credit_limit == 0:
+        util_pts = 25  # no credit used = no risk here
+    elif credit_util <= 10:
+        util_pts = 25
+    elif credit_util <= 30:
+        util_pts = 18
+    elif credit_util <= 60:
+        util_pts = 8
+    else:
+        util_pts = 0
+    score += util_pts
+    score_breakdown.append(("Credit utilization", util_pts, 25,
+                            f"{credit_util:.0f}% of limit used"))
+
+    # 3. Savings rate (max 25 pts) — cashflow / income
+    savings_rate = (monthly_cashflow / total_monthly_income * 100) if total_monthly_income > 0 else 0
+    if savings_rate >= 30:
+        savings_pts = 25
+    elif savings_rate >= 15:
+        savings_pts = 18
+    elif savings_rate >= 5:
+        savings_pts = 10
+    elif savings_rate > 0:
+        savings_pts = 5
+    else:
+        savings_pts = 0
+    score += savings_pts
+    score_breakdown.append(("Savings rate", savings_pts, 25,
+                            f"{savings_rate:.0f}% of income saved monthly"))
+
+    # 4. Debt-to-asset ratio (max 20 pts)
+    total_assets_all = total_cash_assets + total_stock_value
+    dta = (total_credit_used / total_assets_all) if total_assets_all > 0 else (1 if total_credit_used > 0 else 0)
+    if dta <= 0.1:
+        dta_pts = 20
+    elif dta <= 0.3:
+        dta_pts = 14
+    elif dta <= 0.6:
+        dta_pts = 6
+    else:
+        dta_pts = 0
+    score += dta_pts
+    score_breakdown.append(("Debt vs assets", dta_pts, 20,
+                            f"{dta*100:.0f}% of assets offset by debt"))
+
+    score = int(round(score))
+    if score >= 80:
+        score_color, score_grade = "var(--accent)", "Excellent"
+    elif score >= 60:
+        score_color, score_grade = "var(--info)", "Good"
+    elif score >= 40:
+        score_color, score_grade = "var(--warn)", "Needs work"
+    else:
+        score_color, score_grade = "var(--danger)", "At risk"
+
+    sc_col1, sc_col2 = st.columns([1, 2])
+    with sc_col1:
+        st.markdown(
+            f"<div style='background:var(--bg-surface);border:1px solid {score_color};"
+            f"border-radius:16px;padding:24px;text-align:center;'>"
+            f"<div style='color:var(--text-dim);font-size:0.72rem;text-transform:uppercase;"
+            f"letter-spacing:0.1em;'>Financial Health</div>"
+            f"<div style='font-family:JetBrains Mono,monospace;font-size:3.2rem;font-weight:800;"
+            f"color:{score_color};line-height:1.1;'>{score}</div>"
+            f"<div style='color:var(--text-dim);font-size:0.8rem;'>out of 100</div>"
+            f"<div style='color:{score_color};font-weight:700;font-size:1.05rem;margin-top:6px;'>{score_grade}</div>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+    with sc_col2:
+        for label, pts, maxp, detail in score_breakdown:
+            pct = pts / maxp
+            bar_color = ("var(--accent)" if pct >= 0.75 else
+                         "var(--warn)" if pct >= 0.4 else "var(--danger)")
+            st.markdown(
+                f"<div style='margin-bottom:10px;'>"
+                f"<div style='display:flex;justify-content:space-between;font-size:0.82rem;margin-bottom:3px;'>"
+                f"<span style='color:var(--text);'>{label}</span>"
+                f"<span style='color:var(--text-muted);font-family:JetBrains Mono,monospace;'>{pts}/{maxp}</span></div>"
+                f"<div style='background:var(--bg-inset);border-radius:4px;height:7px;overflow:hidden;'>"
+                f"<div style='background:{bar_color};width:{pct*100:.0f}%;height:100%;'></div></div>"
+                f"<div style='color:var(--text-dim);font-size:0.74rem;margin-top:2px;'>{detail}</div>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+
+    # ── Prioritized action items ──
+    st.markdown("#### 📋 What to focus on next")
+    actions = []
+
+    if runway_months < 3:
+        gap = (3 - runway_months) * monthly_burn
+        actions.append(("🚨", "var(--danger)", "Build your emergency fund",
+            f"You have {runway_months:.1f} months of expenses saved. Aim for 3+ months. "
+            f"You need about {gap:,.0f} EGP more to reach a 3-month buffer."))
+
+    if credit_util > 30:
+        target_balance = total_credit_limit * 0.30
+        paydown = total_credit_used - target_balance
+        actions.append(("💳", "var(--warn)", "Lower your credit utilization",
+            f"You're using {credit_util:.0f}% of your credit. Paying down ~{paydown:,.0f} EGP "
+            f"gets you under the 30% mark that protects your credit score."))
+
+    # Debt vs invest guidance — compare highest card APR to expected investment return
+    highest_apr = 0
+    highest_apr_name = ""
+    for a in user_accounts:
+        if float(a.get("balance", 0) or 0) > 0 and float(a.get("apr", 0) or 0) > highest_apr:
+            highest_apr = float(a["apr"])
+            highest_apr_name = a["provider"]
+    if highest_apr >= 20 and total_credit_used > 0:
+        actions.append(("⚖️", "var(--info)", "Pay debt before investing",
+            f"Your {highest_apr_name} card charges {highest_apr:.0f}% APR. That's a guaranteed "
+            f"'return' from paying it off — higher than most investments. Clear high-APR debt "
+            f"before putting money into stocks or gold."))
+
+    if savings_rate < 10 and total_monthly_income > 0:
+        actions.append(("📈", "var(--warn)", "Increase your savings rate",
+            f"You're saving {savings_rate:.0f}% of income. Even reaching 15% would add "
+            f"{(0.15 - savings_rate/100) * total_monthly_income:,.0f} EGP/month toward your goals."))
+
+    if monthly_cashflow < 0:
+        actions.append(("⛔", "var(--danger)", "You're spending more than you earn",
+            f"Your monthly cashflow is negative ({monthly_cashflow:,.0f} EGP). Review the "
+            f"Finance Hub expense breakdown and trim where you can — this is the top priority."))
+
+    # Positive reinforcement if doing well
+    if not actions:
+        actions.append(("🎉", "var(--accent)", "You're in great shape",
+            "Your fundamentals are solid: healthy runway, low utilization, positive savings. "
+            "Consider putting surplus cash to work — see the EGX Stocks or Gold pages."))
+
+    if total_stock_value == 0 and runway_months >= 6 and monthly_cashflow > 0:
+        actions.append(("🌱", "var(--accent)", "Consider starting to invest",
+            "You have a solid emergency fund and positive cashflow but no investments yet. "
+            "Even small monthly amounts into EGX index names or gold compound over time."))
+
+    for emoji, color, title, body in actions:
+        st.markdown(
+            f"<div style='background:var(--bg-surface);border:1px solid var(--border-2);"
+            f"border-left:3px solid {color};border-radius:10px;padding:12px 16px;margin-bottom:8px;'>"
+            f"<b style='color:{color};'>{emoji} {title}</b><br>"
+            f"<span style='color:var(--text-muted);font-size:0.86rem;line-height:1.5;'>{body}</span>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
     # ── Row 5: Quick links ──
     st.markdown("---")
     st.markdown("#### 🔗 Jump to details")
@@ -8723,11 +9167,11 @@ elif st.session_state['page'] == 'FinanceDash':
 
 
 # ==========================================
-# PAGE: SMART BUYING CALENDAR (v11 new — Pro+ feature)
+# PAGE: SMART BUYING CALENDAR (v10 new — Pro+ feature)
 
 
 # ==========================================
-# PAGE: SMART BUYING CALENDAR (v11.1 — UX redesign)
+# PAGE: SMART BUYING CALENDAR (v10.1 — UX redesign)
 # ==========================================
 elif st.session_state['page'] == 'BuyTime':
     # ──────────────────────────────────────────────────────────────────
@@ -8887,7 +9331,7 @@ elif st.session_state['page'] == 'BuyTime':
         gantt_rows = []
         cat_colors = {
             "iphone":               "#3b82f6",
-            "laptop":               "#8b5cf6",
+            "laptop":               "#fb923c",
             "car":                  "#ef4444",
             "summer_clothes":       "#f59e0b",
             "winter_clothes":       "#06b6d4",
@@ -8895,7 +9339,7 @@ elif st.session_state['page'] == 'BuyTime':
             "appliances":           "#22c55e",
             "smart_home":           "#14b8a6",
             "personal_care_beauty": "#ec4899",
-            "furniture":            "#a855f7",
+            "furniture":            "#22c55e",
         }
 
         for w in all_windows:
@@ -8972,7 +9416,7 @@ elif st.session_state['page'] == 'BuyTime':
                 ),
                 margin=dict(l=0, r=20, t=20, b=20),
                 showlegend=False,
-                hoverlabel=dict(bgcolor="#0d1b2a", bordercolor="#1e3a5f",
+                hoverlabel=dict(bgcolor="#0d1b2a", bordercolor="#334155",
                                 font_size=12, font_color="#e2e8f0"),
             )
             st.plotly_chart(fig, use_container_width=True)
