@@ -1,18 +1,18 @@
 {
-  "_run_at": "2026-10-16T08:33:27.604604",
-  "_date": "2026-10-16",
+  "_run_at": "2026-10-17T08:05:48.645600",
+  "_date": "2026-10-17",
   "usd_egp": {
     "asset": "usd_egp",
-    "rate": 53.4478,
-    "prev_close": 53.4478,
+    "rate": 53.5,
+    "prev_close": 53.5,
     "change_pct": 0,
     "source": "goldpricez.com"
   },
   "btc": {
     "asset": "btc",
-    "usd": 82198.0,
-    "egp": 4393440.0,
-    "change_pct_24h": 1.2136156151962219,
+    "usd": 81648.0,
+    "egp": 4340445.0,
+    "change_pct_24h": -0.7511452652017113,
     "source": "coingecko"
   }
 }
